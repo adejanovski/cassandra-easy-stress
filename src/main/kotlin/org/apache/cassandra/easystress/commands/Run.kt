@@ -59,6 +59,8 @@ import org.apache.cassandra.easystress.generators.ParsedFieldFunction
 import org.apache.cassandra.easystress.generators.Registry
 import org.apache.logging.log4j.kotlin.logger
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Paths
 import java.util.Timer
 import kotlin.concurrent.fixedRateTimer
 import kotlin.concurrent.schedule
@@ -120,6 +122,9 @@ class Run(
 
     @Parameter(names = ["--password", "-P"])
     var password = "cassandra"
+
+    @Parameter(names = ["--astra-bundle", "--secure-connect-bundle"], description = "Path to Astra secure connect bundle (zip file)")
+    var astraSecureConnectBundle: String? = null
 
     @Parameter(required = true)
     var workload = ""
@@ -317,6 +322,9 @@ class Run(
     @Parameter(names = ["--no-schema"], description = "Skips schema creation")
     var noSchema: Boolean = false
 
+    @Parameter(names = ["--skip-keyspace-creation"], description = "Skips keyspace creation")
+    var skipKeyspaceCreation: Boolean = false
+
     @Parameter(
         names = ["--deleterate", "--deletes"],
         description = "Deletion Rate, 0-1.  Workloads may have their own defaults.  Default is dependent on workload.",
@@ -377,19 +385,52 @@ class Run(
 
         // Build the CqlSession
         val sessionBuilder =
-            CqlSession
-                .builder()
-                .addContactPoint(java.net.InetSocketAddress(host, cqlPort))
-                .withAuthCredentials(username, password)
-                .withConfigLoader(configLoaderBuilder.build())
+            if (astraSecureConnectBundle != null) {
+                // Astra cloud connection using secure connect bundle
+                val bundlePath = Paths.get(astraSecureConnectBundle)
+                
+                // Validate bundle exists
+                if (!Files.exists(bundlePath)) {
+                    throw IllegalArgumentException("Astra secure connect bundle not found: $astraSecureConnectBundle")
+                }
+                if (!Files.isReadable(bundlePath)) {
+                    throw IllegalArgumentException("Astra secure connect bundle is not readable: $astraSecureConnectBundle")
+                }
+                
+                println("Using Astra cloud secure connect bundle: $astraSecureConnectBundle")
+                
+                // Warn if conflicting options are provided
+                if (host != "127.0.0.1" && System.getenv("CASSANDRA_EASY_STRESS_CASSANDRA_HOST") == null) {
+                    println("Warning: --host is ignored when using Astra bundle")
+                }
+                if (ssl) {
+                    println("Warning: --ssl is ignored when using Astra bundle (SSL is configured automatically)")
+                }
+                
+                CqlSession
+                    .builder()
+                    .withCloudSecureConnectBundle(bundlePath)
+                    .withAuthCredentials(username, password)
+                    .withConfigLoader(configLoaderBuilder.build())
+            } else {
+                // Traditional Cassandra connection
+                val builder =
+                    CqlSession
+                        .builder()
+                        .addContactPoint(java.net.InetSocketAddress(host, cqlPort))
+                        .withAuthCredentials(username, password)
+                        .withConfigLoader(configLoaderBuilder.build())
 
-        // Add SSL if needed
-        if (ssl) {
-            sessionBuilder.withSslContext(
-                javax.net.ssl.SSLContext
-                    .getDefault(),
-            )
-        }
+                // Add SSL if needed
+                if (ssl) {
+                    builder.withSslContext(
+                        javax.net.ssl.SSLContext
+                            .getDefault(),
+                    )
+                }
+                
+                builder
+            }
 
         // Show settings about to be used
         println(
@@ -700,20 +741,22 @@ class Run(
         if (noSchema) {
             println("Skipping keyspace creation")
         } else {
-            if (dropKeyspace) {
-                println("Dropping $keyspace")
-                session.execute("DROP KEYSPACE IF EXISTS $keyspace")
-                Thread.sleep(5000)
+            if (!skipKeyspaceCreation) {
+                if (dropKeyspace) {
+                    println("Dropping $keyspace")
+                    session.execute("DROP KEYSPACE IF EXISTS $keyspace")
+                    Thread.sleep(5000)
+                }
+
+                val createKeyspace =
+                    """CREATE KEYSPACE
+                | IF NOT EXISTS $keyspace
+                | WITH replication = $replication
+                    """.trimMargin()
+
+                println("Creating $keyspace: \n$createKeyspace\n")
+                session.execute(createKeyspace)
             }
-
-            val createKeyspace =
-                """CREATE KEYSPACE
-            | IF NOT EXISTS $keyspace
-            | WITH replication = $replication
-                """.trimMargin()
-
-            println("Creating $keyspace: \n$createKeyspace\n")
-            session.execute(createKeyspace)
         }
         session.execute("USE $keyspace")
     }
