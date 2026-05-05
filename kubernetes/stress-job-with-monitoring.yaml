@@ -1,0 +1,195 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stress-test
+  namespace: benchmarks
+spec:
+  template:
+    spec:
+      # Volumes for configurations and data
+      volumes:
+        # Existing volumes from original job
+        - name: astra-bundle
+          secret:
+            secretName: astra-bundle-n1
+        - name: results
+          emptyDir: {}
+        - name: stress-logs
+          emptyDir: {}
+        
+        # Prometheus configuration and data volumes
+        - name: prometheus-config
+          configMap:
+            name: prometheus-config
+        - name: prometheus-data
+          emptyDir: {}
+        
+        # Grafana configuration volumes
+        - name: grafana-datasource
+          configMap:
+            name: grafana-datasource
+        - name: grafana-dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: grafana-dashboard
+          configMap:
+            name: grafana-dashboard
+      
+      # Main containers (all run indefinitely)
+      containers:
+        # Container 1: cassandra-easy-stress
+        # Runs the stress test, then sleeps indefinitely to keep metrics endpoint available
+        - name: cassandra-easy-stress
+          image: adejanovski/cassandra-easy-stress:astra-jdk17-amd64
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Run the stress test with all arguments
+              java -jar /app/cassandra-easy-stress.jar run BasicTimeSeries \
+                -r 0.25 \
+                --cl LOCAL_QUORUM \
+                --rate 10000 \
+                -t 10 \
+                -c 10 \
+                -d 3h \
+                --csv /tmp/stress/stress_results.csv \
+                --replication "{'class': 'NetworkTopologyStrategy', 'dc-1': 3}" \
+                --keyspace testks \
+                --skip-keyspace-creation \
+                --astra-bundle /astra/<astra bundle file> \
+                -U <user> \
+                -P '<password>'
+              
+              # After stress test completes, keep container alive
+              echo "Stress test completed. Keeping container alive for metrics access..."
+              sleep infinity
+          ports:
+            - name: metrics
+              containerPort: 9500
+              protocol: TCP
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1000m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+          volumeMounts:
+            - name: astra-bundle
+              mountPath: /astra
+            - name: results
+              mountPath: /tmp/stress
+            - name: stress-logs
+              mountPath: /home/stress/.cassandra-easy-stress
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+        
+        # Container 2: Prometheus
+        # Scrapes metrics from cassandra-easy-stress and stores them for 7 days
+        - name: prometheus
+          image: prom/prometheus:latest
+          args:
+            - '--config.file=/etc/prometheus/prometheus.yml'
+            - '--storage.tsdb.path=/prometheus'
+            - '--storage.tsdb.retention.time=7d'
+            - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+            - '--web.console.templates=/usr/share/prometheus/consoles'
+            - '--web.enable-lifecycle'
+          ports:
+            - name: prometheus
+              containerPort: 9090
+              protocol: TCP
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          volumeMounts:
+            - name: prometheus-config
+              mountPath: /etc/prometheus
+            - name: prometheus-data
+              mountPath: /prometheus
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+        
+        # Container 3: Grafana
+        # Provides visualization dashboard for metrics
+        - name: grafana
+          image: grafana/grafana:latest
+          env:
+            # Enable anonymous access for simplicity
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: "Admin"
+            - name: GF_AUTH_DISABLE_LOGIN_FORM
+              value: "true"
+            # Set default dashboard
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: "/etc/grafana/provisioning/dashboards/cassandra-easy-stress-dashboard.json"
+          ports:
+            - name: grafana
+              containerPort: 3000
+              protocol: TCP
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+          volumeMounts:
+            - name: grafana-datasource
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: grafana-dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards/provider
+            - name: grafana-dashboard
+              mountPath: /etc/grafana/provisioning/dashboards
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      
+      # Job configuration
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      securityContext: {}
+      schedulerName: default-scheduler
+  
+  # Job completion settings
+  completionMode: NonIndexed
+  suspend: false
+  podReplacementPolicy: TerminatingOrFailed
+  # Job will not complete automatically - manual cleanup required
+  # This allows you to review metrics after the stress test finishes
+
+# Made with Bob
