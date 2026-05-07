@@ -21,6 +21,11 @@ USERNAME=""
 PASSWORD=""
 ASTRA_BUNDLE=""
 HOST=""
+ASTRA_DB_ID=""
+ASTRA_TOKEN=""
+ASTRA_TOKEN_FILE="token.json"
+ASTRA_API_HOST="api.astra.datastax.com"
+TEMP_BUNDLE=""
 
 # Function to display usage
 usage() {
@@ -31,7 +36,7 @@ Deploy cassandra-easy-stress with Prometheus and Grafana monitoring to Kubernete
 
 OPTIONS:
     -n, --name NAME              Job name (default: cassandra-easy-stress)
-    -N, --namespace NAMESPACE    Kubernetes namespace (default: amc-benchmarks)
+    -N, --namespace NAMESPACE    Kubernetes namespace (default: benchmarks)
     -w, --workload WORKLOAD      Workload name (default: BasicTimeSeries)
     -r, --read-rate RATE         Read rate ratio 0-1 (default: 0.25)
     -C, --cl LEVEL               Consistency level (default: LOCAL_QUORUM)
@@ -40,16 +45,37 @@ OPTIONS:
     -d, --duration TIME          Duration (e.g., 3h, 30m, 1h30m) (default: 3h)
     -c, --concurrency NUM        Connections per thread (default: 10)
     -k, --keyspace NAME          Target keyspace (default: testks)
-    -u, --username USER          Cassandra username (required)
-    -p, --password PASS          Cassandra password (required)
-    -b, --bundle PATH            Path to Astra bundle zip file (optional, use with Astra)
-    -H, --host HOST              Cassandra host (optional, use instead of bundle)
+    -u, --username USER          Cassandra username (required unless using --astra with token file)
+    -p, --password PASS          Cassandra password (required unless using --astra with token file)
+    -b, --bundle PATH            Path to Astra bundle zip file (optional)
+    -H, --host HOST              Cassandra host (optional)
+    --astra DB_ID                Astra database UUID (downloads bundle via API)
+    --astra-token TOKEN          Astra authentication token (AstraCS:...)
+    --astra-token-file PATH      Path to JSON credentials file (default: token.json)
+    --astra-api-host HOST        Astra API host (default: api.astra.datastax.com)
     -h, --help                   Display this help message
 
-NOTE:
-    Either --bundle or --host must be provided (not both).
-    Use --bundle for Astra DB connections.
-    Use --host for direct Cassandra cluster connections.
+CONNECTION OPTIONS (mutually exclusive):
+    Choose ONE of the following:
+    1. --bundle PATH             Use existing Astra bundle file (requires -u/-p)
+    2. --host HOST               Connect directly to Cassandra host (requires -u/-p)
+    3. --astra DB_ID             Download Astra bundle via API (credentials from token file)
+
+ASTRA TOKEN AUTHENTICATION:
+    When using --astra, credentials can be provided via:
+    1. JSON file (default: token.json in current directory)
+       - Automatically extracts clientId → username, secret → password
+    2. Command-line: --astra-token "AstraCS:..." (requires -u/-p)
+    
+    JSON file format:
+    {
+      "clientId": "nfBHuJnmszppzqzdfoQ",
+      "secret": ",00grmb3c-vJka,AiHhlhGyyLcEd5UxbUQ9tqerMEXzOM2JSeE6LZYd9lv52ZNzQJspakLQB2.Z7iFZ...",
+      "token": "AstraCS:nfBHuJnmszppzqSuELPzdfoQ:33cf5ca5ec48eeeb0c1c1e832e7c26d15f9ee54fde7017bbcf9471"
+    }
+    
+    Note: When using token file, username/password are automatically extracted from
+    clientId/secret fields. You can override them with -u/-p if needed.
 
 AVAILABLE WORKLOADS:
     BasicTimeSeries, KeyValue, CountersWide, Maps, Sets, UdtTimeSeries,
@@ -57,16 +83,31 @@ AVAILABLE WORKLOADS:
     RangeScan, CreateDrop, DSESearch, Locking, TxnCounter
 
 EXAMPLES:
-    # Astra DB deployment
+    # Astra DB with token file (credentials auto-extracted from token.json)
+    $0 --astra 1c05f0ab-cd5d-4508-9c67-1da94007f124
+
+    # Astra DB with custom token file
+    $0 --astra 1c05f0ab-cd5d-4508-9c67-1da94007f124 \\
+       --astra-token-file /path/to/credentials.json
+
+    # Astra DB with command-line token (requires explicit username/password)
+    $0 --astra 1c05f0ab-cd5d-4508-9c67-1da94007f124 \\
+       --astra-token "AstraCS:..." -u myuser -p mypass
+
+    # Astra DB with token file but override credentials
+    $0 --astra 1c05f0ab-cd5d-4508-9c67-1da94007f124 \\
+       -u custom_user -p custom_pass
+
+    # Astra DB with existing bundle file
     $0 -u myuser -p mypass -b /path/to/bundle.zip
 
     # Direct Cassandra cluster connection
     $0 -u myuser -p mypass -H cassandra.example.com
 
-    # Custom configuration with Astra
-    $0 -n my-stress-test -N my-namespace \\
-       -r 0.5 -R 5000 -t 20 -d 1h \\
-       -u myuser -p mypass -b /path/to/bundle.zip
+    # Custom configuration with Astra API
+    $0 --astra 1c05f0ab-cd5d-4508-9c67-1da94007f124 \\
+       -n my-stress-test -N my-namespace \\
+       -r 0.5 -R 5000 -t 20 -d 1h
 
     # High throughput test with direct host
     $0 -R 50000 -t 50 -c 20 -d 30m \\
@@ -74,6 +115,163 @@ EXAMPLES:
 
 EOF
     exit 1
+}
+
+# Function to load Astra credentials from token file or command line
+load_astra_credentials() {
+    local using_token_file=false
+    
+    # Check if jq is available (needed for JSON parsing)
+    if ! command -v jq &> /dev/null; then
+        echo "ERROR: 'jq' command not found"
+        echo "       Please install jq: brew install jq (macOS) or apt-get install jq (Linux)"
+        exit 1
+    fi
+    
+    # If token not provided via command line, load from file
+    if [ -z "$ASTRA_TOKEN" ]; then
+        # Try to load from token file
+        if [ ! -f "$ASTRA_TOKEN_FILE" ]; then
+            echo "ERROR: Astra token file not found: $ASTRA_TOKEN_FILE"
+            echo "       Either provide --astra-token or create a token.json file with:"
+            echo "       {"
+            echo "         \"clientId\": \"...\","
+            echo "         \"secret\": \"...\","
+            echo "         \"token\": \"AstraCS:...\""
+            echo "       }"
+            exit 1
+        fi
+        
+        echo "Loading Astra credentials from: $ASTRA_TOKEN_FILE"
+        using_token_file=true
+        
+        ASTRA_TOKEN=$(jq -r '.token' "$ASTRA_TOKEN_FILE" 2>/dev/null)
+        
+        if [ -z "$ASTRA_TOKEN" ] || [ "$ASTRA_TOKEN" == "null" ]; then
+            echo "ERROR: Failed to read token from $ASTRA_TOKEN_FILE"
+            echo "       Make sure the file contains valid JSON with 'token' field"
+            exit 1
+        fi
+    else
+        echo "Using Astra token from command line"
+    fi
+    
+    # If using token file and username/password not provided, extract from JSON
+    if [ "$using_token_file" = true ]; then
+        if [ -z "$USERNAME" ]; then
+            USERNAME=$(jq -r '.clientId' "$ASTRA_TOKEN_FILE" 2>/dev/null)
+            if [ -z "$USERNAME" ] || [ "$USERNAME" == "null" ]; then
+                echo "ERROR: Failed to read clientId from $ASTRA_TOKEN_FILE"
+                echo "       Make sure the file contains valid JSON with 'clientId' field"
+                exit 1
+            fi
+            echo "✓ Using clientId from token file as username"
+        fi
+        
+        if [ -z "$PASSWORD" ]; then
+            PASSWORD=$(jq -r '.secret' "$ASTRA_TOKEN_FILE" 2>/dev/null)
+            if [ -z "$PASSWORD" ] || [ "$PASSWORD" == "null" ]; then
+                echo "ERROR: Failed to read secret from $ASTRA_TOKEN_FILE"
+                echo "       Make sure the file contains valid JSON with 'secret' field"
+                exit 1
+            fi
+            echo "✓ Using secret from token file as password"
+        fi
+    fi
+    
+    echo "✓ Astra credentials loaded successfully"
+}
+
+# Function to download Astra secure connect bundle
+download_astra_bundle() {
+    echo "==========================================" >&2
+    echo "Downloading Astra Secure Connect Bundle" >&2
+    echo "==========================================" >&2
+    echo "" >&2
+    
+    # Check if curl is available
+    if ! command -v curl &> /dev/null; then
+        echo "ERROR: 'curl' command not found" >&2
+        echo "       Please install curl" >&2
+        exit 1
+    fi
+    
+    # Step 1: Validate database exists and get info
+    echo "Validating Astra database: $ASTRA_DB_ID" >&2
+    echo "Astra token: $ASTRA_TOKEN" >&2
+    
+    response=$(curl -sS -X GET \
+        -H "Authorization: Bearer ${ASTRA_TOKEN}" \
+        "https://${ASTRA_API_HOST}/v2/databases/${ASTRA_DB_ID}")
+    
+    STATUS=$(echo "$response" | jq -r '.status // "null"')
+    DB_NAME=$(echo "$response" | jq -r '.info.name // "null"')
+    
+    if [ "$STATUS" == "null" ]; then
+        echo "ERROR: Database ${ASTRA_DB_ID} not found or token is invalid" >&2
+        echo "Response: $response" >&2
+        exit 1
+    fi
+    
+    echo "✓ Database found: $DB_NAME (Status: $STATUS)" >&2
+    echo "" >&2
+    
+    # Step 2: Generate download URL for Secure Connect Bundle
+    echo "Generating secure connect bundle URL..." >&2
+    
+    sb_response=$(curl -sS -X POST \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${ASTRA_TOKEN}" \
+        "https://${ASTRA_API_HOST}/v2/databases/${ASTRA_DB_ID}/secureBundleURL")
+    
+    DOWNLOAD_URL=$(echo "$sb_response" | jq -r '.downloadURL // ""')
+    
+    if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
+        echo "ERROR: Failed to get secure bundle download URL" >&2
+        echo "Response: $sb_response" >&2
+        exit 1
+    fi
+    
+    echo "✓ Download URL generated" >&2
+    echo "" >&2
+    
+    # Step 3: Download the bundle to a temporary file
+    local TEMP_BUNDLE_FILE=$(mktemp /tmp/secure-connect-${DB_NAME}-XXXXXX.zip)
+    
+    echo "Downloading secure connect bundle..." >&2
+    if ! curl -sS -L "$DOWNLOAD_URL" -o "$TEMP_BUNDLE_FILE"; then
+        echo "ERROR: Failed to download secure connect bundle" >&2
+        rm -f "$TEMP_BUNDLE_FILE"
+        exit 1
+    fi
+    
+    # Verify the bundle was downloaded and has content
+    if [ ! -f "$TEMP_BUNDLE_FILE" ]; then
+        echo "ERROR: Bundle file was not created" >&2
+        exit 1
+    fi
+    
+    if [ "$OSTYPE" == "darwin"* ]; then
+        # macOS
+        SIZE=$(stat -f%z "$TEMP_BUNDLE_FILE" 2>/dev/null)
+    else
+        # Linux
+        SIZE=$(stat -c%s "$TEMP_BUNDLE_FILE" 2>/dev/null)
+    fi
+    
+    if [ "$SIZE" -eq 0 ]; then
+        echo "ERROR: Downloaded bundle file is empty" >&2
+        rm -f "$TEMP_BUNDLE_FILE"
+        exit 1
+    fi
+    
+    echo "✓ Secure connect bundle downloaded successfully" >&2
+    echo "  File: $TEMP_BUNDLE_FILE" >&2
+    echo "  Size: $SIZE bytes" >&2
+    echo "" >&2
+    
+    # Return the path to the downloaded bundle (stdout only)
+    echo "$TEMP_BUNDLE_FILE"
 }
 
 # Parse command line arguments
@@ -135,6 +333,22 @@ while [[ $# -gt 0 ]]; do
             HOST="$2"
             shift 2
             ;;
+        --astra)
+            ASTRA_DB_ID="$2"
+            shift 2
+            ;;
+        --astra-token)
+            ASTRA_TOKEN="$2"
+            shift 2
+            ;;
+        --astra-token-file)
+            ASTRA_TOKEN_FILE="$2"
+            shift 2
+            ;;
+        --astra-api-host)
+            ASTRA_API_HOST="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             ;;
@@ -147,29 +361,83 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate required parameters
-if [ -z "$USERNAME" ]; then
-    echo "ERROR: Username is required (-u/--username)"
+# Note: Username and password can be extracted from token file when using --astra
+# So we only validate them after credential loading if not using --astra
+if [ -z "$ASTRA_DB_ID" ]; then
+    # Not using --astra, so username and password are required
+    if [ -z "$USERNAME" ]; then
+        echo "ERROR: Username is required (-u/--username)"
+        echo ""
+        usage
+    fi
+
+    if [ -z "$PASSWORD" ]; then
+        echo "ERROR: Password is required (-p/--password)"
+        echo ""
+        usage
+    fi
+fi
+
+# Validate that exactly one connection method is provided
+CONNECTION_COUNT=0
+[ -n "$ASTRA_BUNDLE" ] && CONNECTION_COUNT=$((CONNECTION_COUNT + 1))
+[ -n "$HOST" ] && CONNECTION_COUNT=$((CONNECTION_COUNT + 1))
+[ -n "$ASTRA_DB_ID" ] && CONNECTION_COUNT=$((CONNECTION_COUNT + 1))
+
+if [ $CONNECTION_COUNT -eq 0 ]; then
+    echo "ERROR: One connection method is required:"
+    echo "  - Astra bundle file: -b/--bundle PATH"
+    echo "  - Cassandra host: -H/--host HOST"
+    echo "  - Astra API download: --astra DATABASE_ID"
     echo ""
     usage
 fi
 
-if [ -z "$PASSWORD" ]; then
-    echo "ERROR: Password is required (-p/--password)"
+if [ $CONNECTION_COUNT -gt 1 ]; then
+    echo "ERROR: Only one connection method can be specified:"
+    echo "  - Astra bundle file (-b/--bundle)"
+    echo "  - Cassandra host (-H/--host)"
+    echo "  - Astra API download (--astra)"
     echo ""
     usage
 fi
 
-# Validate that either bundle or host is provided (but not both)
-if [ -z "$ASTRA_BUNDLE" ] && [ -z "$HOST" ]; then
-    echo "ERROR: Either Astra bundle (-b/--bundle) or Cassandra host (-H/--host) is required"
+# Handle Astra API download if --astra is specified
+if [ -n "$ASTRA_DB_ID" ]; then
+    echo "=========================================="
+    echo "Astra API Bundle Download"
+    echo "=========================================="
     echo ""
-    usage
-fi
-
-if [ -n "$ASTRA_BUNDLE" ] && [ -n "$HOST" ]; then
-    echo "ERROR: Cannot specify both Astra bundle (-b) and host (-H). Choose one."
+    
+    # Load credentials (from file or command line)
+    # This will also populate USERNAME and PASSWORD from token file if not provided
+    load_astra_credentials
     echo ""
-    usage
+    
+    # Validate that we now have username and password
+    if [ -z "$USERNAME" ]; then
+        echo "ERROR: Username is required"
+        echo "       Provide via -u/--username or include 'clientId' in token file"
+        exit 1
+    fi
+    
+    if [ -z "$PASSWORD" ]; then
+        echo "ERROR: Password is required"
+        echo "       Provide via -p/--password or include 'secret' in token file"
+        exit 1
+    fi
+    
+    # Download the bundle
+    TEMP_BUNDLE=$(download_astra_bundle)
+    
+    # Set ASTRA_BUNDLE to the downloaded file
+    ASTRA_BUNDLE="$TEMP_BUNDLE"
+    
+    # Setup cleanup trap to remove temporary bundle on exit
+    trap "rm -f $TEMP_BUNDLE" EXIT
+    
+    echo "✓ Bundle ready for deployment"
+    echo ""
 fi
 
 # Setup connection-specific variables
@@ -326,7 +594,7 @@ cat >> "$TEMP_JOB_FILE" << EOF
             - /bin/sh
             - -c
             - |
-              java -jar /app/cassandra-easy-stress.jar run $WORKLOAD \\
+              java -Xmx4G -Xms4G -jar /app/cassandra-easy-stress.jar run $WORKLOAD \\
                 -r $READ_RATE \\
                 --cl $CONSISTENCY_LEVEL \\
                 --rate $OPS_RATE \\
@@ -363,10 +631,9 @@ cat >> "$TEMP_JOB_FILE" << EOF
           resources:
             requests:
               memory: "2Gi"
-              cpu: "1000m"
+              cpu: "4"
             limits:
-              memory: "4Gi"
-              cpu: "2000m"
+              memory: "5Gi"
           volumeMounts:
 EOF
 
@@ -403,7 +670,7 @@ cat >> "$TEMP_JOB_FILE" << EOF
           resources:
             requests:
               memory: "512Mi"
-              cpu: "250m"
+              cpu: "1"
             limits:
               memory: "8Gi"
           volumeMounts:
