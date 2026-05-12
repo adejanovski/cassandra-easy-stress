@@ -74,16 +74,24 @@ Use the automated deployment script with either Astra DB or direct Cassandra con
 **For Astra DB:**
 ```bash
 cd kubernetes
-./deploy.sh \
+./stress.sh \
   -u <username> \
   -p <password> \
   -b /path/to/secure-connect-bundle.zip
 ```
 
+If you have an astra token json file, you can connect using it:
+```bash
+cd kubernetes
+./stress.sh \
+  --astra <database id> \
+  --astra-token-file /path/to/astra-token.json \
+```
+
 **For Direct Cassandra Connection:**
 ```bash
 cd kubernetes
-./deploy.sh \
+./stress.sh \
   -u <username> \
   -p <password> \
   -H cassandra.example.com
@@ -101,7 +109,7 @@ The script will:
 All stress test parameters are configurable via command-line arguments:
 
 ```bash
-./deploy.sh \
+./stress.sh \
   --name my-stress-test \
   --namespace my-namespace \
   --read-rate 0.5 \
@@ -114,6 +122,7 @@ All stress test parameters are configurable via command-line arguments:
   --username myuser \
   --password mypass \
   --bundle /path/to/bundle.zip
+  --args "--workload.limit=20"
 ```
 
 #### Available Options
@@ -132,6 +141,11 @@ All stress test parameters are configurable via command-line arguments:
 - `-p, --password`: Cassandra password (required)
 - `-b, --bundle`: Path to Astra bundle zip (required for Astra)
 - `-H, --host`: Cassandra host (required for direct connection)
+- `--args`: Additional arguments to pass to cassandra-easy-stress (default: )
+- `--astra`: Astra database UUID (downloads bundle via API)
+- `--astra-token`: Astra authentication token (AstraCS:...)
+- `--astra-token-file`: Path to JSON credentials file (default: token.json)
+- `--astra-api-host`: Astra API host (default: api.astra.datastax.com)
 
 **Note:** Either `-b` (bundle) or `-H` (host) must be provided, but not both.
 
@@ -391,7 +405,7 @@ kubectl delete configmap grafana-dashboard -n amc-benchmarks
 Use command-line arguments when deploying:
 
 ```bash
-./deploy.sh \
+./stress.sh \
   -n my-test \
   -w KeyValue \     # Use KeyValue workload
   -r 0.5 \          # 50% reads, 50% writes
@@ -404,9 +418,9 @@ Use command-line arguments when deploying:
   -u user -p pass -b /path/to/bundle.zip
 ```
 
-All available parameters are documented in the deploy.sh help:
+All available parameters are documented in the stress.sh help:
 ```bash
-./deploy.sh --help
+./stress.sh --help
 ```
 
 ### Modify Prometheus Retention
@@ -454,10 +468,9 @@ For production workloads, increase limits in `stress-job-with-monitoring.yaml`:
 resources:
   requests:
     memory: "4Gi"
-    cpu: "2000m"
+    cpu: "7000m"
   limits:
     memory: "8Gi"
-    cpu: "4000m"
 ```
 
 ## Advanced Usage

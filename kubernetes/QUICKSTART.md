@@ -14,16 +14,24 @@ Get up and running with cassandra-easy-stress monitoring in 5 minutes!
 **For Astra DB:**
 ```bash
 cd kubernetes
-./deploy.sh \
+./stress.sh \
   -u <username> \
   -p <password> \
   -b /path/to/secure-connect-bundle.zip
 ```
 
+If you have an astra token json file, you can connect using it:
+```bash
+cd kubernetes
+./stress.sh \
+  --astra <database id> \
+  --astra-token-file /path/to/astra-token.json \
+```
+
 **For Direct Cassandra:**
 ```bash
 cd kubernetes
-./deploy.sh \
+./stress.sh \
   -u <username> \
   -p <password> \
   -H cassandra.example.com
@@ -39,7 +47,7 @@ That's it! The script will:
 ### Custom Configuration
 
 ```bash
-./deploy.sh \
+./stress.sh \
   -n my-stress-test \
   -N my-namespace \
   -w KeyValue \

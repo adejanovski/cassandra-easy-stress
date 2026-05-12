@@ -26,6 +26,7 @@ ASTRA_TOKEN=""
 ASTRA_TOKEN_FILE="token.json"
 ASTRA_API_HOST="api.astra.datastax.com"
 TEMP_BUNDLE=""
+ADDITIONAL_ARGS=""
 
 # Function to display usage
 usage() {
@@ -49,6 +50,7 @@ OPTIONS:
     -p, --password PASS          Cassandra password (required unless using --astra with token file)
     -b, --bundle PATH            Path to Astra bundle zip file (optional)
     -H, --host HOST              Cassandra host (optional)
+    --args ARGS                  Additional arguments to pass to cassandra-easy-stress (default: )
     --astra DB_ID                Astra database UUID (downloads bundle via API)
     --astra-token TOKEN          Astra authentication token (AstraCS:...)
     --astra-token-file PATH      Path to JSON credentials file (default: token.json)
@@ -259,7 +261,7 @@ download_astra_bundle() {
         SIZE=$(stat -c%s "$TEMP_BUNDLE_FILE" 2>/dev/null)
     fi
     
-    if [ "$SIZE" -eq 0 ]; then
+    if [ "$SIZE" == "0" ]; then
         echo "ERROR: Downloaded bundle file is empty" >&2
         rm -f "$TEMP_BUNDLE_FILE"
         exit 1
@@ -347,6 +349,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --astra-api-host)
             ASTRA_API_HOST="$2"
+            shift 2
+            ;;
+        --args)
+            ADDITIONAL_ARGS="$2"
             shift 2
             ;;
         -h|--help)
@@ -473,6 +479,9 @@ echo "  Duration:          $DURATION"
 echo "  Concurrency:       $CONCURRENCY"
 echo "  Keyspace:          $KEYSPACE"
 echo "  Username:          $USERNAME"
+if [ -n "$ADDITIONAL_ARGS" ]; then
+    echo "  Additional Args:   $ADDITIONAL_ARGS"
+fi
 if [ "$USE_ASTRA" = true ]; then
     echo "  Connection:        Astra DB"
     echo "  Astra Bundle:      $BUNDLE_FILENAME"
@@ -615,6 +624,13 @@ EOF
 else
     cat >> "$TEMP_JOB_FILE" << EOF
                 --host $HOST \\
+EOF
+fi
+
+# Add additional arguments if provided
+if [ -n "$ADDITIONAL_ARGS" ]; then
+    cat >> "$TEMP_JOB_FILE" << EOF
+                $ADDITIONAL_ARGS \\
 EOF
 fi
 
