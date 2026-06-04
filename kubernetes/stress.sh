@@ -27,6 +27,7 @@ ASTRA_TOKEN_FILE="token.json"
 ASTRA_API_HOST="api.astra.datastax.com"
 TEMP_BUNDLE=""
 ADDITIONAL_ARGS=""
+KUBE_CONTEXT=""
 
 # Function to display usage
 usage() {
@@ -54,7 +55,8 @@ OPTIONS:
     --astra DB_ID                Astra database UUID (downloads bundle via API)
     --astra-token TOKEN          Astra authentication token (AstraCS:...)
     --astra-token-file PATH      Path to JSON credentials file (default: token.json)
-    --astra-api-host HOST        Astra API host (default: api.astra.datastax.com)
+    --astra-api-host HOST        Astra API host (default: api.astra.datastax.com, alternative: api.dev.cloud.datastax.com)
+    --context CONTEXT            Kubernetes context to use (optional, uses current context if not specified)
     -h, --help                   Display this help message
 
 CONNECTION OPTIONS (mutually exclusive):
@@ -351,6 +353,10 @@ while [[ $# -gt 0 ]]; do
             ASTRA_API_HOST="$2"
             shift 2
             ;;
+        --context)
+            KUBE_CONTEXT="$2"
+            shift 2
+            ;;
         --args)
             ADDITIONAL_ARGS="$2"
             shift 2
@@ -498,10 +504,18 @@ if ! command -v kubectl &> /dev/null; then
     exit 1
 fi
 
+# Build kubectl command prefix with context if specified
+KUBECTL_CMD="kubectl"
+if [ -n "$KUBE_CONTEXT" ]; then
+    KUBECTL_CMD="kubectl --context=$KUBE_CONTEXT"
+    echo "Using Kubernetes context: $KUBE_CONTEXT"
+    echo ""
+fi
+
 # Check if namespace exists, create if not
-if ! kubectl get namespace "$NAMESPACE" &> /dev/null; then
+if ! $KUBECTL_CMD get namespace "$NAMESPACE" &> /dev/null; then
     echo "Namespace '$NAMESPACE' does not exist. Creating..."
-    kubectl create namespace "$NAMESPACE"
+    $KUBECTL_CMD create namespace "$NAMESPACE"
     echo "✓ Namespace created"
 else
     echo "✓ Namespace '$NAMESPACE' exists"
@@ -512,12 +526,12 @@ echo ""
 if [ "$USE_ASTRA" = true ]; then
     echo "Step 1: Creating Astra bundle secret..."
     echo "--------------------------------"
-    if kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" &> /dev/null; then
+    if $KUBECTL_CMD get secret "$SECRET_NAME" -n "$NAMESPACE" &> /dev/null; then
         echo "Secret '$SECRET_NAME' already exists. Deleting and recreating..."
-        kubectl delete secret "$SECRET_NAME" -n "$NAMESPACE"
+        $KUBECTL_CMD delete secret "$SECRET_NAME" -n "$NAMESPACE"
     fi
 
-    kubectl create secret generic "$SECRET_NAME" \
+    $KUBECTL_CMD create secret generic "$SECRET_NAME" \
         --from-file="$ASTRA_BUNDLE" \
         -n "$NAMESPACE"
 
@@ -532,10 +546,10 @@ if [ "$USE_ASTRA" = false ]; then
 fi
 echo "Step $STEP_NUM: Deploying ConfigMaps..."
 echo "--------------------------------"
-kubectl apply -f "$SCRIPT_DIR/configmaps/prometheus-config.yaml" -n "$NAMESPACE"
-kubectl apply -f "$SCRIPT_DIR/configmaps/grafana-datasource.yaml" -n "$NAMESPACE"
-kubectl apply -f "$SCRIPT_DIR/configmaps/grafana-dashboard-provider.yaml" -n "$NAMESPACE"
-kubectl apply -f "$SCRIPT_DIR/configmaps/grafana-dashboard.yaml" -n "$NAMESPACE"
+$KUBECTL_CMD apply -f "$SCRIPT_DIR/configmaps/prometheus-config.yaml" -n "$NAMESPACE"
+$KUBECTL_CMD apply -f "$SCRIPT_DIR/configmaps/grafana-datasource.yaml" -n "$NAMESPACE"
+$KUBECTL_CMD apply -f "$SCRIPT_DIR/configmaps/grafana-dashboard-provider.yaml" -n "$NAMESPACE"
+$KUBECTL_CMD apply -f "$SCRIPT_DIR/configmaps/grafana-dashboard.yaml" -n "$NAMESPACE"
 
 echo ""
 echo "✓ ConfigMaps deployed successfully"
@@ -545,7 +559,7 @@ echo ""
 STEP_NUM=$((STEP_NUM + 1))
 echo "Step $STEP_NUM: Verifying ConfigMaps..."
 echo "--------------------------------"
-kubectl get configmaps -n "$NAMESPACE" | grep -E "(prometheus-config|grafana-)" || true
+$KUBECTL_CMD get configmaps -n "$NAMESPACE" | grep -E "(prometheus-config|grafana-)" || true
 echo ""
 
 # Generate Job YAML from template
@@ -771,7 +785,7 @@ echo ""
 # Deploy the Job
 echo "Step 5: Deploying the Job..."
 echo "--------------------------------"
-kubectl apply -f "$TEMP_JOB_FILE"
+$KUBECTL_CMD apply -f "$TEMP_JOB_FILE"
 rm "$TEMP_JOB_FILE"
 echo ""
 echo "✓ Job deployed successfully"
@@ -782,13 +796,13 @@ echo "Step 6: Waiting for pod to be created..."
 echo "--------------------------------"
 sleep 3
 
-POD_NAME=$(kubectl get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+POD_NAME=$($KUBECTL_CMD get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
 
 if [ -z "$POD_NAME" ]; then
     echo "Pod not yet created. Waiting..."
     for i in {1..30}; do
         sleep 2
-        POD_NAME=$(kubectl get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        POD_NAME=$($KUBECTL_CMD get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
         if [ -n "$POD_NAME" ]; then
             break
         fi
@@ -797,7 +811,11 @@ fi
 
 if [ -z "$POD_NAME" ]; then
     echo "ERROR: Pod was not created after 60 seconds"
-    echo "Check job status: kubectl describe job $JOB_NAME -n $NAMESPACE"
+    CONTEXT_FLAG=""
+    if [ -n "$KUBE_CONTEXT" ]; then
+        CONTEXT_FLAG="--context=$KUBE_CONTEXT "
+    fi
+    echo "Check job status: kubectl ${CONTEXT_FLAG}describe job $JOB_NAME -n $NAMESPACE"
     exit 1
 fi
 
@@ -807,40 +825,53 @@ echo ""
 # Show pod status
 echo "Step 7: Checking pod status..."
 echo "--------------------------------"
-kubectl get pod "$POD_NAME" -n "$NAMESPACE"
+$KUBECTL_CMD get pod "$POD_NAME" -n "$NAMESPACE"
 echo ""
 
 echo "=========================================="
 echo "Deployment Complete!"
 echo "=========================================="
 echo ""
+# Build context flag for kubectl commands in output
+CONTEXT_FLAG=""
+if [ -n "$KUBE_CONTEXT" ]; then
+    CONTEXT_FLAG="--context=$KUBE_CONTEXT "
+fi
+
 echo "Job Name:  $JOB_NAME"
 echo "Namespace: $NAMESPACE"
 echo "Pod Name:  $POD_NAME"
+if [ -n "$KUBE_CONTEXT" ]; then
+    echo "Context:   $KUBE_CONTEXT"
+fi
 echo ""
 echo "Next Steps:"
 echo "----------"
 echo ""
 echo "1. Monitor pod startup:"
-echo "   kubectl get pod $POD_NAME -n $NAMESPACE -w"
+echo "   kubectl ${CONTEXT_FLAG}get pod $POD_NAME -n $NAMESPACE -w"
 echo ""
 echo "2. View logs:"
-echo "   kubectl logs -n $NAMESPACE $POD_NAME -c cassandra-easy-stress -f"
+echo "   kubectl ${CONTEXT_FLAG}logs -n $NAMESPACE $POD_NAME -c cassandra-easy-stress -f"
 echo ""
 echo "3. Access Grafana dashboard (once pod is ready):"
-echo "   kubectl port-forward -n $NAMESPACE $POD_NAME 3000:3000"
+echo "   kubectl ${CONTEXT_FLAG}port-forward -n $NAMESPACE $POD_NAME 3000:3000"
 echo "   Then open: http://localhost:3000"
 echo ""
 echo "4. Access Prometheus (optional):"
-echo "   kubectl port-forward -n $NAMESPACE $POD_NAME 9090:9090"
+echo "   kubectl ${CONTEXT_FLAG}port-forward -n $NAMESPACE $POD_NAME 9090:9090"
 echo "   Then open: http://localhost:9090"
 echo ""
 echo "5. View raw metrics (optional):"
-echo "   kubectl port-forward -n $NAMESPACE $POD_NAME 9500:9500"
+echo "   kubectl ${CONTEXT_FLAG}port-forward -n $NAMESPACE $POD_NAME 9500:9500"
 echo "   Then open: http://localhost:9500/metrics"
 echo ""
 echo "6. Cleanup when done:"
-echo "   $SCRIPT_DIR/cleanup.sh -n $JOB_NAME -N $NAMESPACE"
+if [ -n "$KUBE_CONTEXT" ]; then
+    echo "   $SCRIPT_DIR/cleanup.sh -n $JOB_NAME -N $NAMESPACE --context $KUBE_CONTEXT"
+else
+    echo "   $SCRIPT_DIR/cleanup.sh -n $JOB_NAME -N $NAMESPACE"
+fi
 echo ""
 echo "For more information, see: $SCRIPT_DIR/README.md"
 echo ""
