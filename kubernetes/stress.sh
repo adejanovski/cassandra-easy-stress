@@ -823,9 +823,9 @@ echo "✓ Pod created: $POD_NAME"
 echo ""
 
 # Show pod status
-echo "Step 7: Checking pod status..."
+echo "Step 7: Waiting for pod to be ready..."
 echo "--------------------------------"
-$KUBECTL_CMD get pod "$POD_NAME" -n "$NAMESPACE"
+$KUBECTL_CMD wait pod "$POD_NAME" -n "$NAMESPACE" --for=condition=Ready --timeout=300s
 echo ""
 
 echo "=========================================="
@@ -875,5 +875,7 @@ fi
 echo ""
 echo "For more information, see: $SCRIPT_DIR/README.md"
 echo ""
+echo "Tailing the logs, hit ctrl-c to stop..."
+kubectl ${CONTEXT_FLAG}logs -n $NAMESPACE $POD_NAME -c cassandra-easy-stress -f
 
 # Made with Bob
