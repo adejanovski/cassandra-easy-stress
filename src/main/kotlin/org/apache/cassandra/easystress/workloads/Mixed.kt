@@ -109,20 +109,21 @@ class Mixed : IStressWorkload {
         )
 
         return object : IStressRunner {
-            private val rng = ThreadLocalRandom.current()
-
             private fun pick(thresholds: DoubleArray): Int {
+                val rng = ThreadLocalRandom.current()
                 val r = rng.nextDouble()
                 thresholds.forEachIndexed { i, t -> if (r < t) return i }
                 return thresholds.size - 1
             }
 
             private fun blob(minBytes: Int, maxBytes: Int): ByteBuffer {
+                val rng = ThreadLocalRandom.current()
                 val size = if (minBytes >= maxBytes) minBytes else rng.nextInt(minBytes, maxBytes + 1)
                 return ByteBuffer.wrap(ByteArray(size).also { rng.nextBytes(it) })
             }
 
             override fun getNextSelect(partitionKey: PartitionKey): Operation {
+                val rng = ThreadLocalRandom.current()
                 val bound = when (pick(readThresholds)) {
                     0  -> selectTable16.bind().setUuid(0, UUID.randomUUID()).setString(1, partitionKey.getText())
                     1  -> selectTable15.bind().setUuid(0, UUID.randomUUID())
@@ -142,6 +143,7 @@ class Mixed : IStressWorkload {
             }
 
             override fun getNextMutation(partitionKey: PartitionKey): Operation {
+                val rng = ThreadLocalRandom.current()
                 val bound = when (pick(writeThresholds)) {
                     0  -> insertTable16.bind()
                             .setUuid(0, UUID.randomUUID())
@@ -250,6 +252,7 @@ class Mixed : IStressWorkload {
             }
 
             override fun getNextDelete(partitionKey: PartitionKey): Operation {
+                val rng = ThreadLocalRandom.current()
                 // Delete uses the same table selection as writes (write-weighted)
                 val bound = when (pick(writeThresholds)) {
                     0  -> selectTable16.bind().setUuid(0, UUID.randomUUID()).setString(1, partitionKey.getText())
