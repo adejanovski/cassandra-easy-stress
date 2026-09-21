@@ -16,6 +16,9 @@ import java.util.concurrent.ThreadLocalRandom
  * Per-table read/write ratios and blob sizes are derived from cfstats.
  */
 class Mixed : IStressWorkload {
+    // Ensures the --readrate warning is printed only once across all threads
+    @Volatile private var warnedAboutReadRate = false
+
     // ── PreparedStatements ────────────────────────────────────────────────────
     private lateinit var insertTable1: PreparedStatement
     private lateinit var selectTable1: PreparedStatement
@@ -110,12 +113,12 @@ class Mixed : IStressWorkload {
                 "INSERT INTO table25 (field1,field2,field3,field4,field5,field6) VALUES (?,?,?,?,?,?)",
             )
         selectTable25 = session.prepare("SELECT * FROM table25 WHERE field1=?")
-        deleteTable1  = session.prepare("DELETE FROM table1  WHERE field1=?")
-        deleteTable3  = session.prepare("DELETE FROM table3  WHERE field1=? AND field2=? AND field3=?")
-        deleteTable4  = session.prepare("DELETE FROM table4  WHERE field1=?")
-        deleteTable6  = session.prepare("DELETE FROM table6  WHERE field1=?")
-        deleteTable7  = session.prepare("DELETE FROM table7  WHERE field1=? AND field2=? AND field3=?")
-        deleteTable8  = session.prepare("DELETE FROM table8  WHERE field1=?")
+        deleteTable1 = session.prepare("DELETE FROM table1  WHERE field1=?")
+        deleteTable3 = session.prepare("DELETE FROM table3  WHERE field1=? AND field2=? AND field3=?")
+        deleteTable4 = session.prepare("DELETE FROM table4  WHERE field1=?")
+        deleteTable6 = session.prepare("DELETE FROM table6  WHERE field1=?")
+        deleteTable7 = session.prepare("DELETE FROM table7  WHERE field1=? AND field2=? AND field3=?")
+        deleteTable8 = session.prepare("DELETE FROM table8  WHERE field1=?")
         deleteTable10 = session.prepare("DELETE FROM table10 WHERE field1=? AND field2=?")
         deleteTable13 = session.prepare("DELETE FROM table13 WHERE field1=?")
         deleteTable15 = session.prepare("DELETE FROM table15 WHERE field1=?")
@@ -126,6 +129,14 @@ class Mixed : IStressWorkload {
     }
 
     override fun getRunner(context: StressContext): IStressRunner {
+        if (!warnedAboutReadRate && context.mainArguments.readRate != null) {
+            println(
+                "WARNING: Mixed workload derives its read/write ratio from cfstats (read rate = ${getDefaultReadRate()}). " +
+                    "The --readrate override is ignored.",
+            )
+            warnedAboutReadRate = true
+        }
+
         // Cumulative read thresholds (index matches tableRunners order below)
         // table16, table15, table6, table4, table24, table25, table10, table3, table13, table21, table1, table7, table8
         val readThresholds =
@@ -362,21 +373,26 @@ class Mixed : IStressWorkload {
 
             override fun getNextDelete(partitionKey: PartitionKey): Operation {
                 val rng = ThreadLocalRandom.current()
-                val bound = when (pick(writeThresholds)) {
-                    0  -> deleteTable16.bind().setUuid(0, UUID.randomUUID()).setString(1, partitionKey.getText())
-                    1  -> deleteTable10.bind().setInt(0, partitionKey.getText().hashCode()).setLong(1, rng.nextLong())
-                    2  -> deleteTable15.bind().setUuid(0, UUID.randomUUID())
-                    3  -> deleteTable4.bind().setUuid(0, UUID.randomUUID())
-                    4  -> deleteTable1.bind().setInt(0, partitionKey.getText().hashCode())
-                    5  -> deleteTable24.bind().setUuid(0, UUID.randomUUID()).setString(1, partitionKey.getText()).setInt(2, rng.nextInt())
-                    6  -> deleteTable6.bind().setInt(0, partitionKey.getText().hashCode())
-                    7  -> deleteTable25.bind().setInt(0, partitionKey.getText().hashCode())
-                    8  -> deleteTable3.bind().setUuid(0, UUID.randomUUID()).setString(1, partitionKey.getText()).setInt(2, rng.nextInt())
-                    9  -> deleteTable13.bind().setUuid(0, UUID.randomUUID())
-                    10 -> deleteTable8.bind().setString(0, partitionKey.getText())
-                    11 -> deleteTable7.bind().setInt(0, rng.nextInt()).setString(1, partitionKey.getText()).setInt(2, rng.nextInt())
-                    else -> deleteTable21.bind().setInt(0, partitionKey.getText().hashCode())
-                }
+                val bound =
+                    when (pick(writeThresholds)) {
+                        0 -> deleteTable16.bind().setUuid(0, UUID.randomUUID()).setString(1, partitionKey.getText())
+                        1 -> deleteTable10.bind().setInt(0, partitionKey.getText().hashCode()).setLong(1, rng.nextLong())
+                        2 -> deleteTable15.bind().setUuid(0, UUID.randomUUID())
+                        3 -> deleteTable4.bind().setUuid(0, UUID.randomUUID())
+                        4 -> deleteTable1.bind().setInt(0, partitionKey.getText().hashCode())
+                        5 ->
+                            deleteTable24.bind().setUuid(
+                                0,
+                                UUID.randomUUID(),
+                            ).setString(1, partitionKey.getText()).setInt(2, rng.nextInt())
+                        6 -> deleteTable6.bind().setInt(0, partitionKey.getText().hashCode())
+                        7 -> deleteTable25.bind().setInt(0, partitionKey.getText().hashCode())
+                        8 -> deleteTable3.bind().setUuid(0, UUID.randomUUID()).setString(1, partitionKey.getText()).setInt(2, rng.nextInt())
+                        9 -> deleteTable13.bind().setUuid(0, UUID.randomUUID())
+                        10 -> deleteTable8.bind().setString(0, partitionKey.getText())
+                        11 -> deleteTable7.bind().setInt(0, rng.nextInt()).setString(1, partitionKey.getText()).setInt(2, rng.nextInt())
+                        else -> deleteTable21.bind().setInt(0, partitionKey.getText().hashCode())
+                    }
                 return Operation.Deletion(bound)
             }
         }
