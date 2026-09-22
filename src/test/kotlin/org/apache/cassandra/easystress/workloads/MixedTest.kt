@@ -88,4 +88,18 @@ class MixedTest {
         val op = runner.getNextDelete(PartitionKey("test", 1L))
         assertThat(op).isInstanceOf(Operation.Deletion::class.java)
     }
+
+    @Test
+    fun `dataSizeFactor defaults to 1_0`() {
+        assertThat(workload.dataSizeFactor).isEqualTo(1.0)
+    }
+
+    @Test
+    fun `getNextMutation returns a Mutation when dataSizeFactor is 0_5`() {
+        workload.dataSizeFactor = 0.5
+        workload.prepare(mockSession())
+        val runner = workload.getRunner(mockk<StressContext>(relaxed = true))
+        val op = runner.getNextMutation(PartitionKey("test", 1L))
+        assertThat(op).isInstanceOf(Operation.Mutation::class.java)
+    }
 }

@@ -4,6 +4,7 @@ import com.datastax.oss.driver.api.core.CqlSession
 import com.datastax.oss.driver.api.core.cql.PreparedStatement
 import org.apache.cassandra.easystress.PartitionKey
 import org.apache.cassandra.easystress.StressContext
+import org.apache.cassandra.easystress.WorkloadParameter
 import java.nio.ByteBuffer
 import java.time.Instant
 import java.util.UUID
@@ -18,6 +19,9 @@ import java.util.concurrent.ThreadLocalRandom
 class Mixed : IStressWorkload {
     // Ensures the --readrate warning is printed only once across all threads
     @Volatile private var warnedAboutReadRate = false
+
+    @WorkloadParameter("Data size factor relative to cfstats baseline. 1.0 = unchanged, 0.5 = half size, 1.5 = 50% larger.")
+    var dataSizeFactor: Double = 1.0
 
     // ── PreparedStatements ────────────────────────────────────────────────────
     private lateinit var insertTable1: PreparedStatement
@@ -131,7 +135,7 @@ class Mixed : IStressWorkload {
     override fun getRunner(context: StressContext): IStressRunner {
         if (!warnedAboutReadRate && context.mainArguments.readRate != null) {
             println(
-                "WARNING: Mixed workload derives its read/write ratio from cfstats (read rate = ${getDefaultReadRate()}). " +
+                "WARNING: Mixed workload uses a predefined read/write ratio across target tables (read rate = ${getDefaultReadRate()}). " +
                     "The --readrate override is ignored.",
             )
             warnedAboutReadRate = true
@@ -187,7 +191,9 @@ class Mixed : IStressWorkload {
                 maxBytes: Int,
             ): ByteBuffer {
                 val rng = ThreadLocalRandom.current()
-                val size = if (minBytes >= maxBytes) minBytes else rng.nextInt(minBytes, maxBytes + 1)
+                val scaledMin = maxOf(1, (minBytes * dataSizeFactor).toInt())
+                val scaledMax = maxOf(scaledMin, (maxBytes * dataSizeFactor).toInt())
+                val size = if (scaledMin >= scaledMax) scaledMin else rng.nextInt(scaledMin, scaledMax + 1)
                 return ByteBuffer.wrap(ByteArray(size).also { rng.nextBytes(it) })
             }
 
