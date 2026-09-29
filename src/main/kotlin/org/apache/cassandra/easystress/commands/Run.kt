@@ -43,11 +43,11 @@ import org.apache.cassandra.easystress.Context
 import org.apache.cassandra.easystress.FileReporter
 import org.apache.cassandra.easystress.Metrics
 import org.apache.cassandra.easystress.PopulateOption
-import org.apache.cassandra.easystress.WorkloadRunner
 import org.apache.cassandra.easystress.RateLimiterOptimizer
 import org.apache.cassandra.easystress.SchemaBuilder
 import org.apache.cassandra.easystress.SingleLineConsoleReporter
 import org.apache.cassandra.easystress.Workload
+import org.apache.cassandra.easystress.WorkloadRunner
 import org.apache.cassandra.easystress.collector.Collector
 import org.apache.cassandra.easystress.collector.CompositeCollector
 import org.apache.cassandra.easystress.collector.HdrCollector
@@ -388,7 +388,7 @@ class Run(
             if (astraSecureConnectBundle != null) {
                 // Astra cloud connection using secure connect bundle
                 val bundlePath = Paths.get(astraSecureConnectBundle)
-                
+
                 // Validate bundle exists
                 if (!Files.exists(bundlePath)) {
                     throw IllegalArgumentException("Astra secure connect bundle not found: $astraSecureConnectBundle")
@@ -396,9 +396,9 @@ class Run(
                 if (!Files.isReadable(bundlePath)) {
                     throw IllegalArgumentException("Astra secure connect bundle is not readable: $astraSecureConnectBundle")
                 }
-                
+
                 println("Using Astra cloud secure connect bundle: $astraSecureConnectBundle")
-                
+
                 // Warn if conflicting options are provided
                 if (host != "127.0.0.1" && System.getenv("CASSANDRA_EASY_STRESS_CASSANDRA_HOST") == null) {
                     println("Warning: --host is ignored when using Astra bundle")
@@ -406,7 +406,7 @@ class Run(
                 if (ssl) {
                     println("Warning: --ssl is ignored when using Astra bundle (SSL is configured automatically)")
                 }
-                
+
                 CqlSession
                     .builder()
                     .withCloudSecureConnectBundle(bundlePath)
@@ -428,7 +428,7 @@ class Run(
                             .getDefault(),
                     )
                 }
-                
+
                 builder
             }
 

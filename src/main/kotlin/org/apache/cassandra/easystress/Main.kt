@@ -31,6 +31,7 @@ fun main(argv: Array<String>) {
         log.error { "Crashed with error: " + e.message }
         println(e.message)
         e.printStackTrace()
+        System.exit(1)
     } finally {
         // we exit here to kill the console thread otherwise it waits forever.
         // I'm sure a reasonable fix exists, but I don't have time to look into it.

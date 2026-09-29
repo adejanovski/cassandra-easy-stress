@@ -84,7 +84,7 @@ ASTRA TOKEN AUTHENTICATION:
 AVAILABLE WORKLOADS:
     BasicTimeSeries, KeyValue, CountersWide, Maps, Sets, UdtTimeSeries,
     RandomPartitionAccess, MaterializedViews, LWT, SAI, AllowFiltering,
-    RangeScan, CreateDrop, DSESearch, Locking, TxnCounter
+    RangeScan, CreateDrop, DSESearch, Locking, TxnCounter, Mixed
 
 EXAMPLES:
     # Astra DB with token file (credentials auto-extracted from token.json)
@@ -612,12 +612,12 @@ cat >> "$TEMP_JOB_FILE" << EOF
       
       containers:
         - name: cassandra-easy-stress
-          image: adejanovski/cassandra-easy-stress:astra-jdk17-amd64
+          image: adejanovski/cassandra-easy-stress:astra-jdk17
           command:
             - /bin/sh
             - -c
             - |
-              java -Xmx4G -Xms4G -jar /app/cassandra-easy-stress.jar run $WORKLOAD \\
+              java -Xmx8G -Xms8G -jar /app/cassandra-easy-stress.jar run $WORKLOAD \\
                 -r $READ_RATE \\
                 --cl $CONSISTENCY_LEVEL \\
                 --rate $OPS_RATE \\
@@ -660,10 +660,10 @@ cat >> "$TEMP_JOB_FILE" << EOF
               protocol: TCP
           resources:
             requests:
-              memory: "2Gi"
-              cpu: "4"
+              memory: "8Gi"
+              cpu: "8"
             limits:
-              memory: "5Gi"
+              memory: "16Gi"
           volumeMounts:
 EOF
 
@@ -682,7 +682,7 @@ cat >> "$TEMP_JOB_FILE" << EOF
               mountPath: /home/stress/.cassandra-easy-stress
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
         
         - name: prometheus
           image: prom/prometheus:latest

@@ -513,12 +513,21 @@ To integrate with cluster-wide Prometheus:
 2. Configure appropriate labels and selectors
 3. External Prometheus will scrape the metrics endpoint at port 9500
 
-## Support
+### Building the docker image
 
-For issues or questions:
-- cassandra-easy-stress: https://github.com/apache/cassandra-easy-stress
-- Prometheus: https://prometheus.io/docs/
-- Grafana: https://grafana.com/docs/
+Compile the jar:
+
+```
+./gradlew shadowJar
+```
+
+Then build the multi-arch image:
+
+```
+docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile . -t <dockerhub org>/cassandra-easy-stress:astra-jdk17 --push
+```
+
+
 
 ## License
 

@@ -7,6 +7,7 @@ import io.mockk.every
 import io.mockk.mockk
 import org.apache.cassandra.easystress.PartitionKey
 import org.apache.cassandra.easystress.StressContext
+import org.apache.cassandra.easystress.commands.Run
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 
@@ -39,8 +40,8 @@ class MixedTest {
     }
 
     @Test
-    fun `schema returns 27 DDL statements`() {
-        assertThat(workload.schema()).hasSize(27)
+    fun `schema returns 10 DDL statements`() {
+        assertThat(workload.schema()).hasSize(10)
     }
 
     @Test
@@ -52,8 +53,8 @@ class MixedTest {
     }
 
     @Test
-    fun `schema contains all 27 expected table names`() {
-        val names = (1..28).map { "table$it" } - setOf("table9")
+    fun `schema contains all 10 active table names`() {
+        val names = (1..10).map { "table$it" }
         val combined = workload.schema().joinToString(" ")
         names.forEach { name ->
             assertThat(combined).containsIgnoringCase(name)
@@ -61,8 +62,13 @@ class MixedTest {
     }
 
     @Test
-    fun `getDefaultReadRate returns 0_42`() {
-        assertThat(workload.getDefaultReadRate()).isEqualTo(0.42)
+    fun `getDefaultReadRate returns 0_4311`() {
+        assertThat(workload.getDefaultReadRate()).isEqualTo(0.4311)
+    }
+
+    @Test
+    fun `partitionCountFactor defaults to 1_0`() {
+        assertThat(workload.partitionCountFactor).isEqualTo(1.0)
     }
 
     @Test
@@ -101,5 +107,39 @@ class MixedTest {
         val runner = workload.getRunner(mockk<StressContext>(relaxed = true))
         val op = runner.getNextMutation(PartitionKey("test", 1L))
         assertThat(op).isInstanceOf(Operation.Mutation::class.java)
+    }
+
+    @Test
+    fun `getNextMutation returns a Mutation when partitionCountFactor is 0_5`() {
+        workload.partitionCountFactor = 0.5
+        workload.prepare(mockSession())
+        val runner = workload.getRunner(mockk<StressContext>(relaxed = true))
+        val op = runner.getNextMutation(PartitionKey("test", 1L))
+        assertThat(op).isInstanceOf(Operation.Mutation::class.java)
+    }
+
+    @Test
+    fun `all operations return correct types across 1000 iterations`() {
+        workload.prepare(mockSession())
+        val runner = workload.getRunner(mockk<StressContext>(relaxed = true))
+        val key = PartitionKey("test", 1L)
+        repeat(1000) {
+            assertThat(runner.getNextSelect(key)).isInstanceOf(Operation.SelectStatement::class.java)
+            assertThat(runner.getNextMutation(key)).isInstanceOf(Operation.Mutation::class.java)
+            assertThat(runner.getNextDelete(key)).isInstanceOf(Operation.Deletion::class.java)
+        }
+    }
+
+    @Test
+    fun `readRate 0_0 is honoured — getRunner returns a working runner`() {
+        val args = mockk<Run>(relaxed = true)
+        every { args.readRate } returns 0.0
+        val context = mockk<StressContext>(relaxed = true)
+        every { context.mainArguments } returns args
+
+        workload.prepare(mockSession())
+        val runner = workload.getRunner(context)
+        // Runner must still produce valid mutations — reads are just never requested by WorkloadRunner
+        assertThat(runner.getNextMutation(PartitionKey("test", 1L))).isInstanceOf(Operation.Mutation::class.java)
     }
 }

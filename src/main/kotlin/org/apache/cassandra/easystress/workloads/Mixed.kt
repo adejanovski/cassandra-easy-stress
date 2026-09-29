@@ -6,175 +6,228 @@ import org.apache.cassandra.easystress.PartitionKey
 import org.apache.cassandra.easystress.StressContext
 import org.apache.cassandra.easystress.WorkloadParameter
 import java.nio.ByteBuffer
-import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ThreadLocalRandom
 
 /**
  * Multi-table mixed workload modelling a real Cassandra keyspace traffic shape.
- * 13 active tables are included in the read/write dispatch; 14 zero-traffic tables
- * have their schema emitted so the keyspace structure mirrors production.
- * Per-table read/write ratios and blob sizes are derived from cfstats.
+ * 10 active tables, numbered by descending combined traffic volume (table1 = highest traffic).
+ * Per-table read/write ratios and partition size distributions are derived from cfstats.
+ * Per-table partition pools and row-count distributions are derived from cfhistograms.
+ *
+ * Each table uses an independent pool-based key generator rather than the shared partitionKey
+ * argument (which is ignored, like --readrate). Pool sizes are scaled by partitionCountFactor.
  */
 class Mixed : IStressWorkload {
     // Ensures the --readrate warning is printed only once across all threads
     @Volatile private var warnedAboutReadRate = false
 
+    // Ensures the --partitioncount warning is printed only once across all threads
+    @Volatile private var warnedAboutPartitionCount = false
+
     @WorkloadParameter("Data size factor relative to cfstats baseline. 1.0 = unchanged, 0.5 = half size, 1.5 = 50% larger.")
     var dataSizeFactor: Double = 1.0
+
+    @WorkloadParameter("Partition count factor relative to cfhistograms baseline. 1.0 = unchanged, 0.5 = half partitions, 2.0 = double.")
+    var partitionCountFactor: Double = 1.0
 
     // ── PreparedStatements ────────────────────────────────────────────────────
     private lateinit var insertTable1: PreparedStatement
     private lateinit var selectTable1: PreparedStatement
+    private lateinit var insertTable2: PreparedStatement
+    private lateinit var selectTable2: PreparedStatement
     private lateinit var insertTable3: PreparedStatement
     private lateinit var selectTable3: PreparedStatement
     private lateinit var insertTable4: PreparedStatement
     private lateinit var selectTable4: PreparedStatement
+    private lateinit var insertTable5: PreparedStatement
+    private lateinit var selectTable5: PreparedStatement
     private lateinit var insertTable6: PreparedStatement
     private lateinit var selectTable6: PreparedStatement
     private lateinit var insertTable7: PreparedStatement
     private lateinit var selectTable7: PreparedStatement
     private lateinit var insertTable8: PreparedStatement
     private lateinit var selectTable8: PreparedStatement
+    private lateinit var insertTable9: PreparedStatement
+    private lateinit var selectTable9: PreparedStatement
     private lateinit var insertTable10: PreparedStatement
     private lateinit var selectTable10: PreparedStatement
-    private lateinit var insertTable13: PreparedStatement
-    private lateinit var selectTable13: PreparedStatement
-    private lateinit var insertTable15: PreparedStatement
-    private lateinit var selectTable15: PreparedStatement
-    private lateinit var insertTable16: PreparedStatement
-    private lateinit var selectTable16: PreparedStatement
-    private lateinit var insertTable21: PreparedStatement
-    private lateinit var selectTable21: PreparedStatement
-    private lateinit var insertTable24: PreparedStatement
-    private lateinit var selectTable24: PreparedStatement
-    private lateinit var insertTable25: PreparedStatement
-    private lateinit var selectTable25: PreparedStatement
 
     // DELETE statements — one per active table
     private lateinit var deleteTable1: PreparedStatement
+    private lateinit var deleteTable2: PreparedStatement
     private lateinit var deleteTable3: PreparedStatement
     private lateinit var deleteTable4: PreparedStatement
+    private lateinit var deleteTable5: PreparedStatement
     private lateinit var deleteTable6: PreparedStatement
     private lateinit var deleteTable7: PreparedStatement
     private lateinit var deleteTable8: PreparedStatement
+    private lateinit var deleteTable9: PreparedStatement
     private lateinit var deleteTable10: PreparedStatement
-    private lateinit var deleteTable13: PreparedStatement
-    private lateinit var deleteTable15: PreparedStatement
-    private lateinit var deleteTable16: PreparedStatement
-    private lateinit var deleteTable21: PreparedStatement
-    private lateinit var deleteTable24: PreparedStatement
-    private lateinit var deleteTable25: PreparedStatement
 
     override fun prepare(session: CqlSession) {
+        // table1: composite PK=(field1 uuid,field2 text)
         insertTable1 =
-            session.prepare("INSERT INTO table1 (field1,field2,field3,field4,field5,field6,field7,field8) VALUES (?,?,?,?,?,?,?,?)")
-        selectTable1 = session.prepare("SELECT * FROM table1 WHERE field1=?")
+            session.prepare(
+                "INSERT INTO table1 (field1,field2,field3,field4,field5,field6,field7) VALUES (?,?,?,?,?,?,?)",
+            )
+        selectTable1 = session.prepare("SELECT * FROM table1 WHERE field1=? AND field2=?")
+        // table2: PK=(field1 uuid)
+        insertTable2 =
+            session.prepare(
+                "INSERT INTO table2 (field1,field2,field3,field4,field5,field6,field7,field8) VALUES (?,?,?,?,?,?,?,?)",
+            )
+        selectTable2 = session.prepare("SELECT * FROM table2 WHERE field1=?")
+        // table3: PK=(field1 uuid)
         insertTable3 =
-            session.prepare(
-                "INSERT INTO table3 (field1,field2,field3,field4,field5,field6,field7,field8,field9,field10,field11,field12)" +
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            )
-        selectTable3 = session.prepare("SELECT * FROM table3 WHERE field1=? AND field2=? AND field3=?")
+            session.prepare("INSERT INTO table3 (field1,field2,field3,field4,field5) VALUES (?,?,?,?,?)")
+        selectTable3 = session.prepare("SELECT * FROM table3 WHERE field1=?")
+        // table4: composite PK=(field1 int,field2 bigint)
         insertTable4 =
-            session.prepare("INSERT INTO table4 (field1,field2,field3,field4,field5) VALUES (?,?,?,?,?)")
-        selectTable4 = session.prepare("SELECT * FROM table4 WHERE field1=?")
+            session.prepare("INSERT INTO table4 (field1,field2,field3,field4,field5,field6,field7) VALUES (?,?,?,?,?,?,?)")
+        selectTable4 = session.prepare("SELECT * FROM table4 WHERE field1=? AND field2=?")
+        // table5: PK=(field1 int)
+        insertTable5 =
+            session.prepare("INSERT INTO table5 (field1,field2,field3,field4,field5) VALUES (?,?,?,?,?)")
+        selectTable5 = session.prepare("SELECT * FROM table5 WHERE field1=?")
+        // table6: composite PK=(field1 uuid,field2 text,field3 int), CK=(field4 int,field5 bigint)
+        // Always exactly 3 rows per partition — CK cycles over fixed values {0,1,2}
         insertTable6 =
-            session.prepare("INSERT INTO table6 (field1,field2,field3,field4,field5) VALUES (?,?,?,?,?)")
-        selectTable6 = session.prepare("SELECT * FROM table6 WHERE field1=?")
-        insertTable7 =
-            session.prepare("INSERT INTO table7 (field1,field2,field3,field4,field5,field6) VALUES (?,?,?,?,?,?)")
-        selectTable7 = session.prepare("SELECT * FROM table7 WHERE field1=? AND field2=? AND field3=?")
-        insertTable8 = session.prepare("INSERT INTO table8 (field1,field2,field3,field4) VALUES (?,?,?,?)")
-        selectTable8 = session.prepare("SELECT * FROM table8 WHERE field1=?")
-        insertTable10 =
-            session.prepare("INSERT INTO table10 (field1,field2,field3,field4,field5,field6,field7) VALUES (?,?,?,?,?,?,?)")
-        selectTable10 = session.prepare("SELECT * FROM table10 WHERE field1=? AND field2=?")
-        insertTable13 =
-            session.prepare("INSERT INTO table13 (field1,field2,field3,field4,field5,field6) VALUES (?,?,?,?,?,?)")
-        selectTable13 = session.prepare("SELECT * FROM table13 WHERE field1=?")
-        insertTable15 =
             session.prepare(
-                "INSERT INTO table15 (field1,field2,field3,field4,field5,field6,field7,field8) VALUES (?,?,?,?,?,?,?,?)",
-            )
-        selectTable15 = session.prepare("SELECT * FROM table15 WHERE field1=?")
-        insertTable16 =
-            session.prepare(
-                "INSERT INTO table16 (field1,field2,field3,field4,field5,field6,field7) VALUES (?,?,?,?,?,?,?)",
-            )
-        selectTable16 = session.prepare("SELECT * FROM table16 WHERE field1=? AND field2=?")
-        insertTable21 =
-            session.prepare("INSERT INTO table21 (field1,field2,field3,field4,field5) VALUES (?,?,?,?,?)")
-        selectTable21 = session.prepare("SELECT * FROM table21 WHERE field1=?")
-        insertTable24 =
-            session.prepare(
-                "INSERT INTO table24 (field1,field2,field3,field4,field5,field6,field7,field8,field9,field10)" +
+                "INSERT INTO table6 (field1,field2,field3,field4,field5,field6,field7,field8,field9,field10)" +
                     " VALUES (?,?,?,?,?,?,?,?,?,?)",
             )
-        selectTable24 = session.prepare("SELECT * FROM table24 WHERE field1=? AND field2=? AND field3=?")
-        insertTable25 =
+        selectTable6 = session.prepare("SELECT * FROM table6 WHERE field1=? AND field2=? AND field3=?")
+        // table7: PK=(field1 int)
+        insertTable7 =
+            session.prepare("INSERT INTO table7 (field1,field2,field3,field4,field5,field6,field7,field8) VALUES (?,?,?,?,?,?,?,?)")
+        selectTable7 = session.prepare("SELECT * FROM table7 WHERE field1=?")
+        // table8: PK=(field1 int)
+        insertTable8 =
             session.prepare(
-                "INSERT INTO table25 (field1,field2,field3,field4,field5,field6) VALUES (?,?,?,?,?,?)",
+                "INSERT INTO table8 (field1,field2,field3,field4,field5,field6) VALUES (?,?,?,?,?,?)",
             )
-        selectTable25 = session.prepare("SELECT * FROM table25 WHERE field1=?")
-        deleteTable1 = session.prepare("DELETE FROM table1  WHERE field1=?")
-        deleteTable3 = session.prepare("DELETE FROM table3  WHERE field1=? AND field2=? AND field3=?")
-        deleteTable4 = session.prepare("DELETE FROM table4  WHERE field1=?")
-        deleteTable6 = session.prepare("DELETE FROM table6  WHERE field1=?")
-        deleteTable7 = session.prepare("DELETE FROM table7  WHERE field1=? AND field2=? AND field3=?")
+        selectTable8 = session.prepare("SELECT * FROM table8 WHERE field1=?")
+        // table9: simple PK=field1 int, CK=(field2 bigint) — always exactly 3 rows, CK cycles {0,1,2}
+        insertTable9 =
+            session.prepare("INSERT INTO table9 (field1,field2,field3,field4,field5) VALUES (?,?,?,?,?)")
+        selectTable9 = session.prepare("SELECT * FROM table9 WHERE field1=?")
+        // table10: composite PK=(field1 int,field2 text,field3 int), CK=(field4 bigint)
+        // Always exactly 3 rows per partition — CK cycles over fixed values {0,1,2}
+        insertTable10 =
+            session.prepare("INSERT INTO table10 (field1,field2,field3,field4,field5,field6) VALUES (?,?,?,?,?,?)")
+        selectTable10 = session.prepare("SELECT * FROM table10 WHERE field1=? AND field2=? AND field3=?")
+        deleteTable1 = session.prepare("DELETE FROM table1  WHERE field1=? AND field2=?")
+        deleteTable2 = session.prepare("DELETE FROM table2  WHERE field1=?")
+        deleteTable3 = session.prepare("DELETE FROM table3  WHERE field1=?")
+        deleteTable4 = session.prepare("DELETE FROM table4  WHERE field1=? AND field2=?")
+        deleteTable5 = session.prepare("DELETE FROM table5  WHERE field1=?")
+        deleteTable6 = session.prepare("DELETE FROM table6  WHERE field1=? AND field2=? AND field3=?")
+        deleteTable7 = session.prepare("DELETE FROM table7  WHERE field1=?")
         deleteTable8 = session.prepare("DELETE FROM table8  WHERE field1=?")
-        deleteTable10 = session.prepare("DELETE FROM table10 WHERE field1=? AND field2=?")
-        deleteTable13 = session.prepare("DELETE FROM table13 WHERE field1=?")
-        deleteTable15 = session.prepare("DELETE FROM table15 WHERE field1=?")
-        deleteTable16 = session.prepare("DELETE FROM table16 WHERE field1=? AND field2=?")
-        deleteTable21 = session.prepare("DELETE FROM table21 WHERE field1=?")
-        deleteTable24 = session.prepare("DELETE FROM table24 WHERE field1=? AND field2=? AND field3=?")
-        deleteTable25 = session.prepare("DELETE FROM table25 WHERE field1=?")
+        deleteTable9 = session.prepare("DELETE FROM table9  WHERE field1=?")
+        deleteTable10 = session.prepare("DELETE FROM table10 WHERE field1=? AND field2=? AND field3=?")
     }
 
     override fun getRunner(context: StressContext): IStressRunner {
-        if (!warnedAboutReadRate && context.mainArguments.readRate != null) {
+        if (!warnedAboutReadRate && context.mainArguments.readRate != null && context.mainArguments.readRate != 0.0) {
             println(
                 "WARNING: Mixed workload uses a predefined read/write ratio across target tables (read rate = ${getDefaultReadRate()}). " +
-                    "The --readrate override is ignored.",
+                    "The --readrate override is ignored. Use --readrate 0 to disable reads entirely.",
             )
             warnedAboutReadRate = true
         }
+        if (!warnedAboutPartitionCount && context.mainArguments.partitionCount != 100_000L) {
+            println(
+                "WARNING: Mixed workload uses per-table partition pools derived from cfhistograms. " +
+                    "The --partitioncount override is ignored. Use --partitioncountfactor instead.",
+            )
+            warnedAboutPartitionCount = true
+        }
 
-        // Cumulative read thresholds (index matches tableRunners order below)
-        // table16, table15, table6, table4, table24, table25, table10, table3, table13, table21, table1, table7, table8
+        // ── Per-table partition pool sizes (scaled by partitionCountFactor) ──────────
+        // Derivation: pools sized so that at steady state each table reaches the row-count
+        // percentiles observed in cfhistograms (reference: 100M total writes).
+        // All pool sizes are relative; scale with partitionCountFactor for smaller/larger clusters.
+        val f = partitionCountFactor
+
+        // table1: bimodal — P50=1 row, P99=4 rows, Max=152K
+        // hot=0.5% of writes → 10 keys accumulate ~23K rows each (< 152K max)
+        // cold=99.5% of writes → 46M keys stay at ~1 row each
+        val t1Cold = maxOf(1L, (46_000_000 * f).toLong())
+        val t1Hot  = maxOf(1L, (10 * f).toLong())
+
+        // table2: P50=1 row, P75=12, P99=24, Max=73K
+        // hot=1% of writes → 10 keys accumulate ~18K rows each (< 73K max)
+        // cold=99% of writes → 18M keys stay at ~1 row each
+        val t2Cold = maxOf(1L, (18_000_000 * f).toLong())
+        val t2Hot  = maxOf(1L, (10 * f).toLong())
+
+        // table3: near-flat — P50=1, P75=3, Max=35
+        // single pool targeting P75=3 rows
+        val t3Pool = maxOf(1L, (4_000_000 * f).toLong())
+
+        // table4: strongly multi-row — P50=4, P75=42, P95=1916, Max=35K
+        // three pools: bulk 90% → P50=4; mid 9% → P75=42; heavy 1% → P99=2299
+        val t4Bulk   = maxOf(1L, (4_000_000 * f).toLong())
+        val t4Mid    = maxOf(1L, (40_000 * f).toLong())
+        val t4Heavy  = maxOf(1L, (100 * f).toLong())
+
+        // table5: extreme bimodal — P50=1 (cold, ~219 KB/row), P75=61K rows (hot, ~165 bytes/row)
+        // hot=25% of writes → 10 keys accumulate ~60K small rows each
+        // cold=75% of writes → 1.8M keys each hold 1 large row
+        val t5Cold = maxOf(1L, (1_800_000 * f).toLong())
+        val t5Hot  = maxOf(1L, (10 * f).toLong())
+
+        // table6: fixed 3 rows/partition — P50=P99=3, Max=3
+        // pool of ~400 partitions; CK cycles over {0,1,2} to hold row count constant
+        val t6Pool = maxOf(1L, (400 * f).toLong())
+
+        // table7: always large — P50=1109, P75=6866, Max=8239
+        // single small pool of ~400 keys, each accumulates 1K–8K rows
+        val t7Pool = maxOf(1L, (400 * f).toLong())
+
+        // table8: always exactly 1 row/partition — P50=P99=1
+        // pool of 50K distinct keys; each has exactly 1 row (CK fixed per insert)
+        val t8Pool = maxOf(1L, (50_000 * f).toLong())
+
+        // table9: near-fixed 3 rows — P50=P99=3, Max=20K
+        // small pool; CK cycles over {0,1,2} to stabilise at 3 rows/partition
+        val t9Pool = maxOf(1L, (30 * f).toLong())
+
+        // table10: near-fixed 3 rows — P50=P99=3, Max=379K
+        // pool of ~43K partitions; CK cycles over {0,1,2}
+        val t10Pool = maxOf(1L, (43_000 * f).toLong())
+
+        // Cumulative read thresholds — tables ordered by descending read share (cfstats)
+        // table1, table5, table2, table3, table8, table4, table10, table6, table9, table7
         val readThresholds =
             doubleArrayOf(
-                0.6574,
-                0.8122,
-                0.8836,
-                0.9665,
-                0.9943,
-                0.9962,
-                0.9998,
-                0.9999,
-                0.99996,
-                0.999966,
-                0.999970,
-                0.999970 + 0.0000027,
+                0.6561806857,
+                0.7819905903,
+                0.9002315580,
+                0.9784406932,
+                0.9879104317,
+                0.9971003682,
+                0.9999689904,
+                0.9999900486,
+                0.9999984273,
                 1.0,
             )
-        // Cumulative write thresholds
-        // table16, table10, table15, table4, table1, table24, table6, table25, table3, table13, table8, table7, table21
+
+        // Cumulative write thresholds — tables ordered by descending write share (cfstats)
+        // table1, table2, table4, table3, table5, table7, table10, table8, table6, table9
         val writeThresholds =
             doubleArrayOf(
-                0.4947,
-                0.6548,
-                0.8362,
-                0.9764,
-                0.9829,
-                0.9968,
-                0.9989,
-                0.9998,
-                0.99982,
-                0.99983,
-                0.99983 + 0.0000001,
-                0.99983 + 0.0000002,
+                0.4658071045,
+                0.6519643056,
+                0.8378270691,
+                0.9693986288,
+                0.9937551121,
+                0.9981212874,
+                0.9994640927,
+                0.9999951549,
+                0.9999990596,
                 1.0,
             )
 
@@ -186,57 +239,126 @@ class Mixed : IStressWorkload {
                 return thresholds.size - 1
             }
 
+            /**
+             * Generates a random blob whose size follows a shifted exponential distribution,
+             * matching the real partition size distribution observed in cfstats.
+             * The distribution has the correct mean and respects [pmin, pmax] bounds.
+             */
             private fun blob(
-                minBytes: Int,
-                maxBytes: Int,
+                pmin: Int,
+                pmean: Int,
+                pmax: Int,
             ): ByteBuffer {
                 val rng = ThreadLocalRandom.current()
-                val scaledMin = maxOf(1, (minBytes * dataSizeFactor).toInt())
-                val scaledMax = maxOf(scaledMin, (maxBytes * dataSizeFactor).toInt())
-                val size = if (scaledMin >= scaledMax) scaledMin else rng.nextInt(scaledMin, scaledMax + 1)
+                val min = maxOf(1, (pmin * dataSizeFactor).toInt())
+                val max = maxOf(min, (pmax * dataSizeFactor).toInt())
+                val mean = maxOf(min, minOf(max, (pmean * dataSizeFactor).toInt()))
+
+                val size =
+                    if (min >= max || mean <= min) {
+                        min
+                    } else {
+                        // Shifted Exp(λ) where λ = 1/(mean-min): produces correct mean,
+                        // decays exponentially toward pmax — matches real partition size skew.
+                        val expSample = (-Math.log(1.0 - rng.nextDouble()) * (mean - min)).toLong()
+                        (min + expSample).coerceAtMost(max.toLong()).toInt()
+                    }
+
                 return ByteBuffer.wrap(ByteArray(size).also { rng.nextBytes(it) })
+            }
+
+            /**
+             * Picks a key from a two-pool bimodal distribution.
+             * hotFraction of the time returns a key in [0, hotSize),
+             * otherwise returns a key in [0, coldSize).
+             */
+            private fun bimodalKey(hotFraction: Double, hotSize: Long, coldSize: Long): Long {
+                val rng = ThreadLocalRandom.current()
+                return if (rng.nextDouble() < hotFraction) rng.nextLong(0, hotSize)
+                       else rng.nextLong(0, coldSize)
+            }
+
+            /**
+             * Picks a key from a three-pool graduated distribution.
+             * heavyFraction → [0, heavySize); midFraction → [0, midSize); else → [0, bulkSize).
+             */
+            private fun trimodalKey(
+                heavyFraction: Double, heavySize: Long,
+                midFraction: Double, midSize: Long,
+                bulkSize: Long,
+            ): Long {
+                val r = ThreadLocalRandom.current().nextDouble()
+                return when {
+                    r < heavyFraction -> ThreadLocalRandom.current().nextLong(0, heavySize)
+                    r < heavyFraction + midFraction -> ThreadLocalRandom.current().nextLong(0, midSize)
+                    else -> ThreadLocalRandom.current().nextLong(0, bulkSize)
+                }
             }
 
             override fun getNextSelect(partitionKey: PartitionKey): Operation {
                 val rng = ThreadLocalRandom.current()
                 val bound =
                     when (pick(readThresholds)) {
-                        0 ->
-                            selectTable16
-                                .bind()
-                                .setUuid(0, UUID.randomUUID())
-                                .setString(1, partitionKey.getText())
-                        1 -> selectTable15.bind().setUuid(0, UUID.randomUUID())
-                        2 -> selectTable6.bind().setInt(0, partitionKey.getText().hashCode())
-                        3 -> selectTable4.bind().setUuid(0, UUID.randomUUID())
-                        4 ->
-                            selectTable24
-                                .bind()
-                                .setUuid(0, UUID.randomUUID())
-                                .setString(1, partitionKey.getText())
-                                .setInt(2, rng.nextInt())
-                        5 -> selectTable25.bind().setInt(0, partitionKey.getText().hashCode())
-                        6 ->
-                            selectTable10
-                                .bind()
-                                .setInt(0, partitionKey.getText().hashCode())
-                                .setLong(1, rng.nextLong())
-                        7 ->
-                            selectTable3
-                                .bind()
-                                .setUuid(0, UUID.randomUUID())
-                                .setString(1, partitionKey.getText())
-                                .setInt(2, rng.nextInt())
-                        8 -> selectTable13.bind().setUuid(0, UUID.randomUUID())
-                        9 -> selectTable21.bind().setInt(0, partitionKey.getText().hashCode())
-                        10 -> selectTable1.bind().setInt(0, partitionKey.getText().hashCode())
-                        11 ->
-                            selectTable7
-                                .bind()
-                                .setInt(0, rng.nextInt())
-                                .setString(1, partitionKey.getText())
-                                .setInt(2, rng.nextInt())
-                        else -> selectTable8.bind().setString(0, partitionKey.getText())
+                        // table1: 65.6% of reads — bimodal pool same as writes
+                        0 -> {
+                            val pk = bimodalKey(0.005, t1Hot, t1Cold)
+                            selectTable1.bind()
+                                .setUuid(0, UUID(0L, pk))
+                                .setString(1, pk.toString())
+                        }
+                        // table5: 12.6% of reads — bimodal pool same as writes
+                        1 -> {
+                            val pk = bimodalKey(0.25, t5Hot, t5Cold)
+                            selectTable5.bind().setInt(0, (pk % Int.MAX_VALUE).toInt())
+                        }
+                        // table2: 11.8% of reads — bimodal pool same as writes
+                        2 -> {
+                            val pk = bimodalKey(0.01, t2Hot, t2Cold)
+                            selectTable2.bind().setUuid(0, UUID(0L, pk))
+                        }
+                        // table3: 7.8% of reads — single pool
+                        3 -> {
+                            val pk = rng.nextLong(0, t3Pool)
+                            selectTable3.bind().setUuid(0, UUID(0L, pk))
+                        }
+                        // table8: 0.95% of reads — single pool
+                        4 -> {
+                            val pk = rng.nextLong(0, t8Pool)
+                            selectTable8.bind().setInt(0, (pk % Int.MAX_VALUE).toInt())
+                        }
+                        // table4: 0.92% of reads — trimodal pool same as writes
+                        5 -> {
+                            val pk = trimodalKey(0.01, t4Heavy, 0.09, t4Mid, t4Bulk)
+                            selectTable4.bind()
+                                .setInt(0, (pk % Int.MAX_VALUE).toInt())
+                                .setLong(1, pk)
+                        }
+                        // table10: 0.29% of reads — single pool cycling CK {0,1,2}
+                        6 -> {
+                            val pk = rng.nextLong(0, t10Pool)
+                            selectTable10.bind()
+                                .setInt(0, (pk % Int.MAX_VALUE).toInt())
+                                .setString(1, pk.toString())
+                                .setInt(2, (pk % 3).toInt())
+                        }
+                        // table6: ~0.002% of reads — fixed-row pool
+                        7 -> {
+                            val pk = rng.nextLong(0, t6Pool)
+                            selectTable6.bind()
+                                .setUuid(0, UUID(0L, pk))
+                                .setString(1, pk.toString())
+                                .setInt(2, (pk % Int.MAX_VALUE).toInt())
+                        }
+                        // table9: ~0.0008% of reads — small fixed-row pool
+                        8 -> {
+                            val pk = rng.nextLong(0, t9Pool)
+                            selectTable9.bind().setInt(0, (pk % Int.MAX_VALUE).toInt())
+                        }
+                        // table7: ~0.0002% of reads — small always-large pool
+                        else -> {
+                            val pk = rng.nextLong(0, t7Pool)
+                            selectTable7.bind().setInt(0, (pk % Int.MAX_VALUE).toInt())
+                        }
                     }
                 return Operation.SelectStatement(bound)
             }
@@ -245,134 +367,137 @@ class Mixed : IStressWorkload {
                 val rng = ThreadLocalRandom.current()
                 val bound =
                     when (pick(writeThresholds)) {
-                        0 ->
-                            insertTable16
-                                .bind()
-                                .setUuid(0, UUID.randomUUID())
-                                .setString(1, partitionKey.getText())
-                                .setUuid(2, UUID.randomUUID())
+                        // table1: 46.6% of writes — bimodal (hot=0.5%, cold=99.5%)
+                        // P50=1 row, P99=4 rows, Max=152K — target ~110 uncompressed bytes/write
+                        0 -> {
+                            val pk = bimodalKey(0.005, t1Hot, t1Cold)
+                            insertTable1.bind()
+                                .setUuid(0, UUID(0L, pk))
+                                .setString(1, pk.toString())
+                                .setUuid(2, UUID.randomUUID())    // CK — always fresh → grows row count
                                 .setInt(3, rng.nextInt())
                                 .setLong(4, rng.nextLong())
-                                .setByteBuffer(5, blob(150, 11_944))
+                                .setByteBuffer(5, blob(1, 30_000, 300_000))
                                 .setString(6, "json")
-                        1 ->
-                            insertTable10
-                                .bind()
-                                .setInt(0, partitionKey.getText().hashCode())
-                                .setLong(1, rng.nextLong())
-                                .setInt(2, rng.nextInt())
-                                .setLong(3, rng.nextLong())
-                                .setLong(4, rng.nextLong())
-                                .setByteBuffer(5, blob(73, 2_346_799))
-                                .setString(6, "json")
-                        2 ->
-                            insertTable15
-                                .bind()
-                                .setUuid(0, UUID.randomUUID())
-                                .setUuid(1, UUID.randomUUID())
+                        }
+                        // table2: 18.6% of writes — bimodal (hot=1%, cold=99%)
+                        // P50=1 row, P75=12, P99=24, Max=73K — target ~95 uncompressed bytes/write
+                        1 -> {
+                            val pk = bimodalKey(0.01, t2Hot, t2Cold)
+                            insertTable2.bind()
+                                .setUuid(0, UUID(0L, pk))
+                                .setUuid(1, UUID.randomUUID())    // CK — always fresh
                                 .setLong(2, rng.nextLong())
                                 .setLong(3, rng.nextLong())
-                                .setByteBuffer(4, blob(87, 7_400))
+                                .setByteBuffer(4, blob(1, 6_000, 50_000))
                                 .setString(5, "json")
                                 .setLong(6, rng.nextLong())
-                                .setLong(7, rng.nextLong())
-                        3 ->
-                            insertTable4
-                                .bind()
-                                .setUuid(0, UUID.randomUUID())
-                                .setUuid(1, UUID.randomUUID())
-                                .setByteBuffer(2, blob(51, 5_722))
+                                .setByteBuffer(7, blob(1, 6_000, 50_000))
+                        }
+                        // table4: 18.6% of writes — trimodal (heavy=1%, mid=9%, bulk=90%)
+                        // P50=4, P75=42, P95=1916, Max=35K — target ~62 uncompressed bytes/write
+                        2 -> {
+                            val pk = trimodalKey(0.01, t4Heavy, 0.09, t4Mid, t4Bulk)
+                            insertTable4.bind()
+                                .setInt(0, (pk % Int.MAX_VALUE).toInt())
+                                .setLong(1, pk)
+                                .setInt(2, rng.nextInt())          // CK — always fresh
+                                .setLong(3, rng.nextLong())
+                                .setLong(4, rng.nextLong())
+                                .setByteBuffer(5, blob(1, 26, 35))
+                                .setString(6, "json")
+                        }
+                        // table3: 13.2% of writes — single pool
+                        // P50=1, P75=3, Max=35 — target ~17 uncompressed bytes/write (overhead-dominated)
+                        3 -> {
+                            val pk = rng.nextLong(0, t3Pool)
+                            insertTable3.bind()
+                                .setUuid(0, UUID(0L, pk))
+                                .setUuid(1, UUID.randomUUID())    // CK — always fresh
+                                .setByteBuffer(2, blob(1, 1, 4))
                                 .setString(3, "json")
                                 .setLong(4, rng.nextLong())
-                        4 ->
-                            insertTable1
-                                .bind()
-                                .setInt(0, partitionKey.getText().hashCode())
-                                .setLong(1, rng.nextLong())
-                                .setString(2, partitionKey.getText())
-                                .setByteBuffer(3, blob(373, 785_939))
+                        }
+                        // table5: 2.4% of writes — extreme bimodal (hot=25%, cold=75%)
+                        // target ~18.5 uncompressed bytes/write (overhead-dominated, minimal blob)
+                        4 -> {
+                            val isHot = rng.nextDouble() < 0.25
+                            val pk = if (isHot) rng.nextLong(0, t5Hot) else rng.nextLong(0, t5Cold)
+                            insertTable5.bind()
+                                .setInt(0, (pk % Int.MAX_VALUE).toInt())
+                                .setInt(1, rng.nextInt())          // CK — always fresh
+                                .setLong(2, rng.nextLong())
+                                .setByteBuffer(3, blob(1, 1, 4))
+                                .setString(4, "json")
+                        }
+                        // table7: 0.44% of writes — small pool, always large partitions
+                        // P50=1109 rows, P75=6866 — target ~5 uncompressed bytes/write (overhead-dominated)
+                        5 -> {
+                            val pk = rng.nextLong(0, t7Pool)
+                            insertTable7.bind()
+                                .setInt(0, (pk % Int.MAX_VALUE).toInt())
+                                .setLong(1, rng.nextLong())        // CK — always fresh
+                                .setString(2, pk.toString())
+                                .setByteBuffer(3, blob(1, 1, 4))
                                 .setString(4, "json")
                                 .setLong(5, rng.nextLong())
-                                .setString(6, partitionKey.getText())
+                                .setString(6, pk.toString())
                                 .setLong(7, rng.nextLong())
-                        5 ->
-                            insertTable24
-                                .bind()
-                                .setUuid(0, UUID.randomUUID())
-                                .setString(1, partitionKey.getText())
-                                .setInt(2, rng.nextInt())
-                                .setInt(3, rng.nextInt())
-                                .setLong(4, rng.nextLong())
+                        }
+                        // table10: 0.13% of writes — fixed 3 rows/partition, CK cycles {0,1,2}
+                        // P50=P99=3 — target ~0.6 uncompressed bytes/write (overhead-dominated)
+                        6 -> {
+                            val pk = rng.nextLong(0, t10Pool)
+                            val ck = rng.nextLong(0, 3)            // CK cycles {0,1,2} → upserts
+                            insertTable10.bind()
+                                .setInt(0, (pk % Int.MAX_VALUE).toInt())
+                                .setString(1, pk.toString())
+                                .setInt(2, (pk % 3).toInt())
+                                .setLong(3, ck)
+                                .setString(4, "json")
+                                .setByteBuffer(5, blob(1, 1, 4))
+                        }
+                        // table8: 0.053% of writes — always exactly 1 row/partition
+                        // P50=P99=1 row, Max=1 — target ~128 uncompressed bytes/write
+                        7 -> {
+                            val pk = rng.nextLong(0, t8Pool)
+                            insertTable8.bind()
+                                .setInt(0, (pk % Int.MAX_VALUE).toInt())
+                                .setInt(1, rng.nextInt())
+                                .setLong(2, rng.nextLong())
+                                .setLong(3, rng.nextLong())
+                                .setByteBuffer(4, blob(1, 100, 128))
+                                .setString(5, "json")
+                        }
+                        // table6: 0.0004% of writes — fixed 3 rows/partition, CK cycles {0,1,2}
+                        // P50=P99=3 — target ~0.3 uncompressed bytes/write (overhead-dominated)
+                        8 -> {
+                            val pk = rng.nextLong(0, t6Pool)
+                            val ck = rng.nextLong(0, 3)            // CK cycles {0,1,2} → upserts
+                            insertTable6.bind()
+                                .setUuid(0, UUID(0L, pk))
+                                .setString(1, pk.toString())
+                                .setInt(2, (pk % Int.MAX_VALUE).toInt())
+                                .setInt(3, ck.toInt())             // CK field4
+                                .setLong(4, ck)                    // CK field5
                                 .setLong(5, rng.nextLong())
-                                .setByteBuffer(6, blob(125, 206_624))
+                                .setByteBuffer(6, blob(1, 1, 4))
                                 .setString(7, "json")
-                                .setByteBuffer(8, blob(125, 206_624))
+                                .setByteBuffer(8, blob(1, 1, 4))
                                 .setString(9, "json")
-                        6 ->
-                            insertTable6
-                                .bind()
-                                .setInt(0, partitionKey.getText().hashCode())
-                                .setInt(1, rng.nextInt())
-                                .setLong(2, rng.nextLong())
-                                .setByteBuffer(3, blob(771, 32_985_760))
-                                .setString(4, "json")
-                        7 ->
-                            insertTable25
-                                .bind()
-                                .setInt(0, partitionKey.getText().hashCode())
-                                .setInt(1, rng.nextInt())
-                                .setLong(2, rng.nextLong())
-                                .setLong(3, rng.nextLong())
-                                .setByteBuffer(4, blob(3_974, 29_521))
-                                .setString(5, "json")
-                        8 ->
-                            insertTable3
-                                .bind()
-                                .setUuid(0, UUID.randomUUID())
-                                .setString(1, partitionKey.getText())
-                                .setInt(2, rng.nextInt())
-                                .setInt(3, rng.nextInt())
-                                .setLong(4, rng.nextLong())
-                                .setLong(5, rng.nextLong())
-                                .setLong(6, rng.nextLong())
-                                .setLong(7, rng.nextLong())
-                                .setByteBuffer(8, blob(180, 719_944))
-                                .setString(9, "json")
-                                .setByteBuffer(10, blob(180, 719_944))
-                                .setString(11, "json")
-                        9 ->
-                            insertTable13
-                                .bind()
-                                .setUuid(0, UUID.randomUUID())
-                                .setString(1, partitionKey.getText())
-                                .setString(2, partitionKey.getText())
-                                .setByteBuffer(3, blob(50, 200))
-                                .setString(4, "json")
-                                .setLong(5, rng.nextLong())
-                        10 ->
-                            insertTable8
-                                .bind()
-                                .setString(0, partitionKey.getText())
-                                .setInstant(1, Instant.now())
-                                .setString(2, partitionKey.getText())
-                                .setString(3, partitionKey.getText())
-                        11 ->
-                            insertTable7
-                                .bind()
-                                .setInt(0, rng.nextInt())
-                                .setString(1, partitionKey.getText())
-                                .setInt(2, rng.nextInt())
-                                .setLong(3, rng.nextLong())
-                                .setString(4, "json")
-                                .setByteBuffer(5, blob(1_917, 2_299))
-                        else ->
-                            insertTable21
-                                .bind()
-                                .setInt(0, partitionKey.getText().hashCode())
-                                .setMap(1, emptyMap<String, Long>(), String::class.java, Long::class.javaObjectType)
-                                .setByteBuffer(2, blob(50, 200))
+                        }
+                        // table9: 0.00009% of writes — fixed 3 rows/partition, CK cycles {0,1,2}
+                        // P50=P99=3 — target ~160 uncompressed bytes/write
+                        else -> {
+                            val pk = rng.nextLong(0, t9Pool)
+                            val ck = rng.nextLong(0, 3)            // CK cycles {0,1,2} → upserts
+                            insertTable9.bind()
+                                .setInt(0, (pk % Int.MAX_VALUE).toInt())
+                                .setLong(1, ck)                    // CK — cycles for fixed row count
+                                .setByteBuffer(2, blob(1, 136, 160))
                                 .setString(3, "json")
                                 .setLong(4, rng.nextLong())
+                        }
                     }
                 return Operation.Mutation(bound)
             }
@@ -381,135 +506,70 @@ class Mixed : IStressWorkload {
                 val rng = ThreadLocalRandom.current()
                 val bound =
                     when (pick(writeThresholds)) {
-                        0 -> deleteTable16.bind().setUuid(0, UUID.randomUUID()).setString(1, partitionKey.getText())
-                        1 -> deleteTable10.bind().setInt(0, partitionKey.getText().hashCode()).setLong(1, rng.nextLong())
-                        2 -> deleteTable15.bind().setUuid(0, UUID.randomUUID())
-                        3 -> deleteTable4.bind().setUuid(0, UUID.randomUUID())
-                        4 -> deleteTable1.bind().setInt(0, partitionKey.getText().hashCode())
-                        5 ->
-                            deleteTable24.bind().setUuid(
-                                0,
-                                UUID.randomUUID(),
-                            ).setString(1, partitionKey.getText()).setInt(2, rng.nextInt())
-                        6 -> deleteTable6.bind().setInt(0, partitionKey.getText().hashCode())
-                        7 -> deleteTable25.bind().setInt(0, partitionKey.getText().hashCode())
-                        8 -> deleteTable3.bind().setUuid(0, UUID.randomUUID()).setString(1, partitionKey.getText()).setInt(2, rng.nextInt())
-                        9 -> deleteTable13.bind().setUuid(0, UUID.randomUUID())
-                        10 -> deleteTable8.bind().setString(0, partitionKey.getText())
-                        11 -> deleteTable7.bind().setInt(0, rng.nextInt()).setString(1, partitionKey.getText()).setInt(2, rng.nextInt())
-                        else -> deleteTable21.bind().setInt(0, partitionKey.getText().hashCode())
+                        0 -> {
+                            val pk = bimodalKey(0.005, t1Hot, t1Cold)
+                            deleteTable1.bind().setUuid(0, UUID(0L, pk)).setString(1, pk.toString())
+                        }
+                        1 -> {
+                            val pk = bimodalKey(0.01, t2Hot, t2Cold)
+                            deleteTable2.bind().setUuid(0, UUID(0L, pk))
+                        }
+                        2 -> {
+                            val pk = trimodalKey(0.01, t4Heavy, 0.09, t4Mid, t4Bulk)
+                            deleteTable4.bind()
+                                .setInt(0, (pk % Int.MAX_VALUE).toInt())
+                                .setLong(1, pk)
+                        }
+                        3 -> {
+                            val pk = rng.nextLong(0, t3Pool)
+                            deleteTable3.bind().setUuid(0, UUID(0L, pk))
+                        }
+                        4 -> {
+                            val pk = bimodalKey(0.25, t5Hot, t5Cold)
+                            deleteTable5.bind().setInt(0, (pk % Int.MAX_VALUE).toInt())
+                        }
+                        5 -> {
+                            val pk = rng.nextLong(0, t7Pool)
+                            deleteTable7.bind().setInt(0, (pk % Int.MAX_VALUE).toInt())
+                        }
+                        6 -> {
+                            val pk = rng.nextLong(0, t10Pool)
+                            deleteTable10.bind()
+                                .setInt(0, (pk % Int.MAX_VALUE).toInt())
+                                .setString(1, pk.toString())
+                                .setInt(2, (pk % 3).toInt())
+                        }
+                        7 -> {
+                            val pk = rng.nextLong(0, t8Pool)
+                            deleteTable8.bind().setInt(0, (pk % Int.MAX_VALUE).toInt())
+                        }
+                        8 -> {
+                            val pk = rng.nextLong(0, t6Pool)
+                            deleteTable6.bind()
+                                .setUuid(0, UUID(0L, pk))
+                                .setString(1, pk.toString())
+                                .setInt(2, (pk % Int.MAX_VALUE).toInt())
+                        }
+                        else -> {
+                            val pk = rng.nextLong(0, t9Pool)
+                            deleteTable9.bind().setInt(0, (pk % Int.MAX_VALUE).toInt())
+                        }
                     }
                 return Operation.Deletion(bound)
             }
         }
     }
 
-    override fun getDefaultReadRate() = 0.42
+    override fun getDefaultReadRate() = 0.4311
 
     // ── schema ────────────────────────────────────────────────────────────────
-    override fun schema(): List<String> = activeTableDDL + zeroTrafficTableDDL
+    override fun schema(): List<String> = activeTableDDL
 
-    // 13 active tables
+    // 10 active tables, ordered by descending combined traffic volume
     private val activeTableDDL =
         listOf(
-            // table1: PK=(field1 int), CK=(field2 bigint DESC, field3 text ASC)
+            // table1: composite PK=(field1 uuid,field2 text), CK=(field3 uuid ASC, field4 int ASC, field5 bigint DESC)
             """CREATE TABLE IF NOT EXISTS table1 (
-            field1 int,
-            field2 bigint,
-            field3 text,
-            field4 blob,
-            field5 text,
-            field6 bigint,
-            field7 text,
-            field8 bigint,
-            PRIMARY KEY (field1, field2, field3)
-        ) WITH CLUSTERING ORDER BY (field2 DESC, field3 ASC)""",
-            // table3: composite PK=(field1 uuid,field2 text,field3 int), CK=(field4 int ASC, field5 bigint ASC, field6 bigint ASC)
-            """CREATE TABLE IF NOT EXISTS table3 (
-            field1 uuid,
-            field2 text,
-            field3 int,
-            field4 int,
-            field5 bigint,
-            field6 bigint,
-            field7 bigint,
-            field8 bigint,
-            field9 blob,
-            field10 text,
-            field11 blob,
-            field12 text,
-            PRIMARY KEY ((field1, field2, field3), field4, field5, field6)
-        ) WITH CLUSTERING ORDER BY (field4 ASC, field5 ASC, field6 ASC)""",
-            // table4: PK=(field1 uuid), CK=(field2 uuid ASC)
-            """CREATE TABLE IF NOT EXISTS table4 (
-            field1 uuid,
-            field2 uuid,
-            field3 blob,
-            field4 text,
-            field5 bigint,
-            PRIMARY KEY (field1, field2)
-        ) WITH CLUSTERING ORDER BY (field2 ASC)""",
-            // table6: PK=(field1 int), CK=(field2 int ASC, field3 bigint ASC)
-            """CREATE TABLE IF NOT EXISTS table6 (
-            field1 int,
-            field2 int,
-            field3 bigint,
-            field4 blob,
-            field5 text,
-            PRIMARY KEY (field1, field2, field3)
-        ) WITH CLUSTERING ORDER BY (field2 ASC, field3 ASC)""",
-            // table7: composite PK=(field1 int,field2 text,field3 int), CK=(field4 bigint ASC)
-            """CREATE TABLE IF NOT EXISTS table7 (
-            field1 int,
-            field2 text,
-            field3 int,
-            field4 bigint,
-            field5 text,
-            field6 blob,
-            PRIMARY KEY ((field1, field2, field3), field4)
-        ) WITH CLUSTERING ORDER BY (field4 ASC)""",
-            // table8: simple PK=field1 text
-            """CREATE TABLE IF NOT EXISTS table8 (
-            field1 text PRIMARY KEY,
-            field2 timestamp,
-            field3 text,
-            field4 text
-        )""",
-            // table10: composite PK=(field1 int,field2 bigint), CK=(field3 int ASC, field4 bigint ASC, field5 bigint ASC)
-            """CREATE TABLE IF NOT EXISTS table10 (
-            field1 int,
-            field2 bigint,
-            field3 int,
-            field4 bigint,
-            field5 bigint,
-            field6 blob,
-            field7 text,
-            PRIMARY KEY ((field1, field2), field3, field4, field5)
-        ) WITH CLUSTERING ORDER BY (field3 ASC, field4 ASC, field5 ASC)""",
-            // table13: PK=(field1 uuid), CK=(field2 text ASC, field3 text ASC)
-            """CREATE TABLE IF NOT EXISTS table13 (
-            field1 uuid,
-            field2 text,
-            field3 text,
-            field4 blob,
-            field5 text,
-            field6 bigint,
-            PRIMARY KEY (field1, field2, field3)
-        ) WITH CLUSTERING ORDER BY (field2 ASC, field3 ASC)""",
-            // table15: PK=(field1 uuid), CK=(field2 uuid ASC, field3 bigint ASC, field4 bigint DESC)
-            """CREATE TABLE IF NOT EXISTS table15 (
-            field1 uuid,
-            field2 uuid,
-            field3 bigint,
-            field4 bigint,
-            field5 blob,
-            field6 text,
-            field7 bigint,
-            field8 bigint,
-            PRIMARY KEY (field1, field2, field3, field4)
-        ) WITH CLUSTERING ORDER BY (field2 ASC, field3 ASC, field4 DESC)""",
-            // table16: composite PK=(field1 uuid,field2 text), CK=(field3 uuid ASC, field4 int ASC, field5 bigint DESC)
-            """CREATE TABLE IF NOT EXISTS table16 (
             field1 uuid,
             field2 text,
             field3 uuid,
@@ -519,16 +579,50 @@ class Mixed : IStressWorkload {
             field7 text,
             PRIMARY KEY ((field1, field2), field3, field4, field5)
         ) WITH CLUSTERING ORDER BY (field3 ASC, field4 ASC, field5 DESC)""",
-            // table21: simple PK=field1 int
-            """CREATE TABLE IF NOT EXISTS table21 (
-            field1 int PRIMARY KEY,
-            field2 map<text, bigint>,
+            // table2: PK=(field1 uuid), CK=(field2 uuid ASC, field3 bigint ASC, field4 bigint DESC)
+            """CREATE TABLE IF NOT EXISTS table2 (
+            field1 uuid,
+            field2 uuid,
+            field3 bigint,
+            field4 bigint,
+            field5 blob,
+            field6 text,
+            field7 bigint,
+            field8 blob,
+            PRIMARY KEY (field1, field2, field3, field4)
+        ) WITH CLUSTERING ORDER BY (field2 ASC, field3 ASC, field4 DESC)""",
+            // table3: PK=(field1 uuid), CK=(field2 uuid ASC)
+            """CREATE TABLE IF NOT EXISTS table3 (
+            field1 uuid,
+            field2 uuid,
             field3 blob,
             field4 text,
-            field5 bigint
-        )""",
-            // table24: composite PK=(field1 uuid,field2 text,field3 int), CK=(field4 int ASC, field5 bigint ASC)
-            """CREATE TABLE IF NOT EXISTS table24 (
+            field5 bigint,
+            PRIMARY KEY (field1, field2)
+        ) WITH CLUSTERING ORDER BY (field2 ASC)""",
+            // table4: composite PK=(field1 int,field2 bigint), CK=(field3 int ASC, field4 bigint ASC, field5 bigint ASC)
+            """CREATE TABLE IF NOT EXISTS table4 (
+            field1 int,
+            field2 bigint,
+            field3 int,
+            field4 bigint,
+            field5 bigint,
+            field6 blob,
+            field7 text,
+            PRIMARY KEY ((field1, field2), field3, field4, field5)
+        ) WITH CLUSTERING ORDER BY (field3 ASC, field4 ASC, field5 ASC)""",
+            // table5: PK=(field1 int), CK=(field2 int ASC, field3 bigint ASC)
+            """CREATE TABLE IF NOT EXISTS table5 (
+            field1 int,
+            field2 int,
+            field3 bigint,
+            field4 blob,
+            field5 text,
+            PRIMARY KEY (field1, field2, field3)
+        ) WITH CLUSTERING ORDER BY (field2 ASC, field3 ASC)""",
+            // table6: composite PK=(field1 uuid,field2 text,field3 int), CK=(field4 int ASC, field5 bigint ASC)
+            // Always exactly 3 rows per partition — CK cycles over {0,1,2}
+            """CREATE TABLE IF NOT EXISTS table6 (
             field1 uuid,
             field2 text,
             field3 int,
@@ -541,8 +635,20 @@ class Mixed : IStressWorkload {
             field10 text,
             PRIMARY KEY ((field1, field2, field3), field4, field5)
         ) WITH CLUSTERING ORDER BY (field4 ASC, field5 ASC)""",
-            // table25: PK=(field1 int), CK=(field2 int ASC, field3 bigint ASC, field4 bigint ASC)
-            """CREATE TABLE IF NOT EXISTS table25 (
+            // table7: PK=(field1 int), CK=(field2 bigint DESC, field3 text ASC)
+            """CREATE TABLE IF NOT EXISTS table7 (
+            field1 int,
+            field2 bigint,
+            field3 text,
+            field4 blob,
+            field5 text,
+            field6 bigint,
+            field7 text,
+            field8 bigint,
+            PRIMARY KEY (field1, field2, field3)
+        ) WITH CLUSTERING ORDER BY (field2 DESC, field3 ASC)""",
+            // table8: PK=(field1 int), CK=(field2 int ASC, field3 bigint ASC, field4 bigint ASC)
+            """CREATE TABLE IF NOT EXISTS table8 (
             field1 int,
             field2 int,
             field3 bigint,
@@ -551,140 +657,25 @@ class Mixed : IStressWorkload {
             field6 text,
             PRIMARY KEY (field1, field2, field3, field4)
         ) WITH CLUSTERING ORDER BY (field2 ASC, field3 ASC, field4 ASC)""",
-        )
-
-    // 14 zero-traffic tables — schema only, no runners
-    private val zeroTrafficTableDDL =
-        listOf(
-            // table2: PK=(field1 uuid), CK=(field2 uuid ASC, field3 bigint ASC, field4 bigint DESC)
-            """CREATE TABLE IF NOT EXISTS table2 (
-            field1 uuid,
-            field2 uuid,
-            field3 bigint,
-            field4 bigint,
-            field5 blob,
-            field6 text,
-            field7 bigint,
-            PRIMARY KEY (field1, field2, field3, field4)
-        ) WITH CLUSTERING ORDER BY (field2 ASC, field3 ASC, field4 DESC)""",
-            // table5: PK=(field1 uuid), CK=(field2 uuid ASC)
-            """CREATE TABLE IF NOT EXISTS table5 (
-            field1 uuid,
-            field2 uuid,
-            field3 blob,
-            field4 text,
-            PRIMARY KEY (field1, field2)
-        ) WITH CLUSTERING ORDER BY (field2 ASC)""",
-            // table11: PK=(field1 tinyint), CK=(field2 tinyint ASC, field3 uuid ASC)
-            """CREATE TABLE IF NOT EXISTS table11 (
-            field1 tinyint,
-            field2 tinyint,
-            field3 uuid,
-            field4 timestamp,
-            field5 inet,
-            field6 smallint,
-            field7 timestamp,
-            PRIMARY KEY (field1, field2, field3)
-        ) WITH CLUSTERING ORDER BY (field2 ASC, field3 ASC)""",
-            // table12: PK=(field1 int), CK=(field2 timestamp ASC, field3 uuid ASC, field4 uuid ASC, field5 timestamp ASC, field6 tinyint ASC)
-            """CREATE TABLE IF NOT EXISTS table12 (
-            field1 int,
-            field2 timestamp,
-            field3 uuid,
-            field4 uuid,
-            field5 timestamp,
-            field6 tinyint,
-            field7 tinyint,
-            field8 map<text, timestamp>,
-            field9 bigint,
-            PRIMARY KEY (field1, field2, field3, field4, field5, field6)
-        ) WITH CLUSTERING ORDER BY (field2 ASC, field3 ASC, field4 ASC, field5 ASC, field6 ASC)""",
-            // table14: simple PK=field1 int
-            """CREATE TABLE IF NOT EXISTS table14 (
-            field1 int PRIMARY KEY,
-            field2 blob,
-            field3 text,
-            field4 bigint,
-            field5 bigint
-        )""",
-            // table17: composite PK=(field1 int,field2 int), CK=(field3 timestamp ASC)
-            """CREATE TABLE IF NOT EXISTS table17 (
-            field1 int,
-            field2 int,
-            field3 timestamp,
-            field4 text,
-            field5 text,
-            field6 text,
-            field7 text,
-            PRIMARY KEY ((field1, field2), field3)
-        ) WITH CLUSTERING ORDER BY (field3 ASC)""",
-            // table18: PK=(field1 int), CK=(field2 text ASC)
-            """CREATE TABLE IF NOT EXISTS table18 (
-            field1 int,
-            field2 text,
-            field3 blob,
-            field4 text,
-            field5 bigint,
-            PRIMARY KEY (field1, field2)
-        ) WITH CLUSTERING ORDER BY (field2 ASC)""",
-            // table19: PK=(field1 int), CK=(field2 bigint ASC)
-            """CREATE TABLE IF NOT EXISTS table19 (
+            // table9: PK=(field1 int), CK=(field2 bigint ASC) — always exactly 3 rows, CK cycles {0,1,2}
+            """CREATE TABLE IF NOT EXISTS table9 (
             field1 int,
             field2 bigint,
-            field3 text,
-            field4 blob,
-            PRIMARY KEY (field1, field2)
-        ) WITH CLUSTERING ORDER BY (field2 ASC)""",
-            // table20: composite PK=(field1 int,field2 text)
-            """CREATE TABLE IF NOT EXISTS table20 (
-            field1 int,
-            field2 text,
-            field3 text,
-            field4 blob,
-            field5 bigint,
-            PRIMARY KEY ((field1, field2))
-        )""",
-            // table22: PK=(field1 int), CK=(field2 text ASC)
-            """CREATE TABLE IF NOT EXISTS table22 (
-            field1 int,
-            field2 text,
             field3 blob,
             field4 text,
-            field5 uuid,
-            field6 boolean,
-            field7 bigint,
+            field5 bigint,
             PRIMARY KEY (field1, field2)
         ) WITH CLUSTERING ORDER BY (field2 ASC)""",
-            // table23: composite PK=(field1 int,field2 int), CK=(field3 bigint DESC, field4 text ASC)
-            """CREATE TABLE IF NOT EXISTS table23 (
+            // table10: composite PK=(field1 int,field2 text,field3 int), CK=(field4 bigint ASC)
+            // Always exactly 3 rows per partition — CK cycles over {0,1,2}
+            """CREATE TABLE IF NOT EXISTS table10 (
             field1 int,
-            field2 int,
-            field3 bigint,
-            field4 text,
-            field5 blob,
-            field6 text,
-            field7 bigint,
-            field8 bigint,
-            PRIMARY KEY ((field1, field2), field3, field4)
-        ) WITH CLUSTERING ORDER BY (field3 DESC, field4 ASC)""",
-            // table26: simple PK=field1 int
-            """CREATE TABLE IF NOT EXISTS table26 (
-            field1 int PRIMARY KEY,
-            field2 blob,
-            field3 text,
-            field4 bigint
-        )""",
-            // table27: simple PK=field1 int
-            """CREATE TABLE IF NOT EXISTS table27 (
-            field1 int PRIMARY KEY,
-            field2 blob,
-            field3 text,
-            field4 bigint
-        )""",
-            // table28: simple PK=field1 uuid
-            """CREATE TABLE IF NOT EXISTS table28 (
-            field1 uuid PRIMARY KEY,
-            field2 text
-        )""",
+            field2 text,
+            field3 int,
+            field4 bigint,
+            field5 text,
+            field6 blob,
+            PRIMARY KEY ((field1, field2, field3), field4)
+        ) WITH CLUSTERING ORDER BY (field4 ASC)""",
         )
 }
